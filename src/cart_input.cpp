@@ -39,25 +39,79 @@ extern "C" void sg_cart_set_pads(const wc_pad_t* pads) {
  *
  * wasmcart delivers pad state as a SNAPSHOT, not a queue: the host writes
  * the current buttons and axes and the cart samples them. There is nothing
- * to drain, so the queue is always empty.
+ * to drain there, and gamepads are read separately through the sg_pad_*
+ * accessors below (pollGamepads(), which is state-based on every platform).
  *
- * Returning SG_EV_NONE immediately is the correct answer, not a stub. It is
- * what ends input.pump()'s loop, and gamepads are read separately through
- * the sg_pad_* accessors below (pollGamepads(), which is state-based on
- * every platform). Keyboard and quit events would arrive here if the cart
- * opted into them; it does not yet. */
-extern "C" uint32_t sg_poll_event(int32_t unused) { (void)unused; return SG_EV_NONE; }
+ * Text is the exception, and the reason this function is not simply a
+ * `return SG_EV_NONE`. Typed characters are delivered once, by callback, and
+ * are gone if the frame that received them does not report them -- so they
+ * DO queue. Everything else still returns NONE, which is what ends
+ * input.pump()'s loop. */
+/* ---- text input (wasmcart 0.16.0+) ----------------------------------
+ *
+ * The host composes text for us: layout, shift, dead keys and IME commits
+ * are already applied, so a cart never reimplements keyboard layouts. It
+ * arrives by CALLBACK (wc_on_text), while scriptc-game reads it by POLLING
+ * an event queue, so this bridges the two.
+ *
+ * Text is off until asked for, and that is load-bearing on the host side:
+ * it raises the on-screen keyboard on mobile and suppresses gameplay key
+ * bindings while active. So sg_text_input really does begin/end rather
+ * than just setting a flag. */
+/* wc_text_input_begin/end come from wasmcart.h, already carrying their
+ * import attributes. Redeclaring them here is not merely redundant: the
+ * header's are C++-linkage, so an extern "C" copy is a hard error. */
+
+/* One frame's worth of typed text. An IME can commit a whole word in one
+ * call, so this is a buffer rather than a single codepoint. */
+static char     g_text[256];
+static uint32_t g_text_len;
+/* Pending EV_TEXT events for sg_poll_event to hand back. */
+static uint32_t g_text_pending;
+/* Monotonic, never decremented: a diagnostic, not a queue depth. */
+static uint32_t g_text_calls;
+
+__attribute__((export_name("wc_on_text")))
+extern "C" void wc_on_text(const char* utf8, uint32_t len) {
+    /* The pointer is valid only for this call, so copy now. Truncate rather
+     * than overflow: a 256-byte frame of typing is already implausible. */
+    if (len > sizeof(g_text)) len = sizeof(g_text);
+    memcpy(g_text, utf8, len);
+    g_text_len = len;
+    g_text_pending++;
+    g_text_calls++;
+}
+
+extern "C" int32_t sg_text_input(uint32_t enable) {
+    if (enable) wc_text_input_begin(); else wc_text_input_end();
+    return SG_OK;
+}
+
+/* Host-side delivery count, for a cart that wants to distinguish "no text
+ * arrived" from "text arrived and the adapter lost it". Those are the same
+ * picture from the game's side. */
+extern "C" uint32_t sg_cart_text_calls(void) { return g_text_calls; }
+
+extern "C" uint32_t sg_text_len(int32_t unused)  { (void)unused; return g_text_len; }
+extern "C" uint32_t sg_text_byte(uint32_t i) {
+    return i < g_text_len ? (uint32_t)(uint8_t)g_text[i] : 0u;
+}
+
+#define SG_EV_TEXT 8
+
+extern "C" uint32_t sg_poll_event(int32_t unused) {
+    (void)unused;
+    /* Text is the one thing that genuinely queues: pad state is a snapshot
+     * the accessors read directly, but typed characters would be lost if
+     * the frame that received them did not report them. */
+    if (g_text_pending > 0) { g_text_pending--; return SG_EV_TEXT; }
+    return SG_EV_NONE;
+}
 
 extern "C" int32_t sg_evt_i32(uint32_t field) { (void)field; return 0; }
 
 extern "C" int32_t sg_input_init(int32_t unused) { (void)unused; return SG_OK; }
 extern "C" void    sg_input_quit(int32_t unused) { (void)unused; }
-
-/* No text input: the cart declares no keyboard, so there is nothing to
- * enable and nothing buffered to read. */
-extern "C" int32_t  sg_text_input(uint32_t enable) { (void)enable; return SG_OK; }
-extern "C" uint32_t sg_text_len(int32_t unused)    { (void)unused; return 0; }
-extern "C" uint32_t sg_text_byte(uint32_t i)       { (void)i; return 0; }
 
 /* ---- gamepads -------------------------------------------------------
  *

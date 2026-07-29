@@ -27,7 +27,7 @@ command -v emcc >/dev/null 2>&1 || { echo "build-canvas.sh: emcc not on PATH" >&
 
 mkdir -p "$OBJ"
 
-CXXF="-O2 -std=c++20 -fno-exceptions -fno-rtti -DSK_RELEASE -I$SG/shim -I$SKIA/include -I$SKIA_HDRS"
+CXXF="-O2 -std=c++20 -fno-exceptions -fno-rtti -DSK_RELEASE -DSG_NO_FONT_PATH -I$SG/shim -I$SKIA/include -I$SKIA_HDRS"
 
 # ---- 1. the FFI manifest ---------------------------------------------
 #
