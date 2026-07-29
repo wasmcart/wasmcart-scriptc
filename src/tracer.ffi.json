@@ -1,0 +1,34 @@
+{
+  "ffi_format": 1,
+  "functions": [
+    {
+      "name": "sg_fb_width",
+      "symbol": "sg_fb_width",
+      "params": [],
+      "returns": "u32"
+    },
+    {
+      "name": "sg_fb_height",
+      "symbol": "sg_fb_height",
+      "params": [],
+      "returns": "u32"
+    },
+    {
+      "name": "sg_fb_set",
+      "symbol": "sg_fb_set",
+      "params": [
+        "u32",
+        "u32"
+      ],
+      "returns": "void"
+    },
+    {
+      "name": "sg_wait_frame",
+      "symbol": "sg_wait_frame",
+      "params": [],
+      "returns": "u32"
+    }
+  ],
+  "libraries": [],
+  "system_libraries": []
+}
