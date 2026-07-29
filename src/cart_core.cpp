@@ -16,6 +16,7 @@
  * mean dragging SDL into a wasm module that has no use for it.
  */
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 extern "C" {
@@ -105,6 +106,67 @@ extern "C" int32_t sg_canvas_release(uint32_t hc) {
 /* sg_surface_create is NOT here: shim/sg_skia_extra.cpp already exports it,
  * and defining it again is a duplicate-symbol link error. Only the symbols
  * unique to sg_core.cpp belong in this file. */
+
+/* ---- fonts ----------------------------------------------------------
+ *
+ * scriptc-game registers fonts by PATH (sg_font_register -> skiac's
+ * register_from_path), which a cart cannot do: there is no filesystem, and
+ * the WASM Skia is deliberately patched not to scan /fonts/ (a directory
+ * nothing creates, which used to be an out-of-bounds write on the first
+ * Canvas call -- see wasmcart-jsgame/REBUILD_STATUS.md).
+ *
+ * So the cart registers from BYTES instead, pulled through the host's asset
+ * API. Same skiac font collection underneath, so sg_text_set_font and
+ * sg_text_draw work unchanged once a family is in it.
+ *
+ * Without any registered font Skia has no typeface to shape with, and text
+ * silently draws nothing: no error, no glyphs, just an unchanged
+ * framebuffer. That is why sg_cart_font_from_asset reports failures through
+ * the mailbox rather than returning void. */
+extern "C" skiac_font_collection* sg_fonts(void);   /* shim/sg_skia_extra.cpp */
+
+__attribute__((import_module("env"), import_name("wc_asset_size")))
+extern "C" int wc_asset_size(const char* path, unsigned int path_len);
+__attribute__((import_module("env"), import_name("wc_load_asset")))
+extern "C" int wc_load_asset(const char* path, unsigned int path_len,
+                             void* dest, unsigned int max_size);
+
+extern "C" int32_t sg_cart_font_from_asset(const uint8_t* path, uint32_t path_len,
+                                           const uint8_t* alias, uint32_t alias_len) {
+    skiac_font_collection* fc = sg_fonts();
+    if (!fc) { mail_set("font collection unavailable"); return SG_ESKIA; }
+
+    char p[512];
+    if (path_len >= sizeof(p)) { mail_set("font asset path too long"); return SG_ERANGE; }
+    memcpy(p, path, path_len);
+    p[path_len] = 0;
+
+    int n = wc_asset_size(p, path_len);
+    if (n <= 0) { mail_set("font asset not found"); return SG_ESKIA; }
+
+    uint8_t* buf = (uint8_t*)malloc((size_t)n);
+    if (!buf) { mail_set("font buffer allocation failed"); return SG_ESKIA; }
+    if (wc_load_asset(p, path_len, buf, (unsigned int)n) != n) {
+        free(buf);
+        mail_set("font asset read short");
+        return SG_ESKIA;
+    }
+
+    char a[128];
+    const char* name = nullptr;
+    if (alias_len > 0 && alias_len < sizeof(a)) {
+        memcpy(a, alias, alias_len);
+        a[alias_len] = 0;
+        name = a;
+    }
+
+    /* Skia COPIES the bytes into its own typeface, so the buffer is ours to
+     * free immediately; keeping it would leak 742KB per registration. */
+    uint32_t id = skiac_font_collection_register(fc, buf, (size_t)n, name);
+    free(buf);
+    if (id == 0) { mail_set("font registration failed (unparseable font data)"); return SG_ESKIA; }
+    return SG_OK;
+}
 
 /* ---- present --------------------------------------------------------
  *

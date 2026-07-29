@@ -20,7 +20,7 @@ question.
 | TS-owned game loop in a cart | works, via wasmcart's yield protocol |
 | Pixels driven by compiled TS | verified to the pixel, with a control |
 | Canvas 2D | **works**: gradients, paths, curves, alpha, transforms |
-| Text (FreeType/HarfBuzz/ICU) | untested |
+| Text (FreeType/HarfBuzz/ICU) | **works**, including `measureText` shaping |
 | WebGL / audio | not started |
 
 ```sh
@@ -124,8 +124,31 @@ compile under emcc with no edits against wasmcart-skia's `libskiac.a`. The
 only new C is `src/cart_core.cpp` (~130 lines), replacing the SDL window half
 of `shim/sg_core.cpp` with a Skia surface copied into the cart framebuffer.
 
-Text is not exercised yet. `fillText` pulls in the whole font stack
-(FreeType, HarfBuzz, ICU) and none of that has been checked.
+### Text
+
+Works, and it is the part that proves the most: `fillText` pulls in FreeType,
+HarfBuzz and ICU, all of which had to survive the wasm build.
+
+Fonts come from the host's asset API, not a path. scriptc-game registers by
+filename (`sg_font_register` -> skiac's `register_from_path`), which a cart
+cannot do: there is no filesystem, and the WASM Skia is deliberately patched
+not to scan `/fonts/`. `cart_core.cpp` adds `sg_cart_font_from_asset`, which
+pulls the bytes through `wc_load_asset` and hands them to
+`skiac_font_collection_register`. Same collection underneath, so
+`sg_text_set_font` and `sg_text_draw` work unchanged.
+
+`measureText` is checked too, because a stack that rasterises but cannot
+shape would pass a glyphs-drawn test. The tracer underlines the title to the
+measured width: the underline spans x 24-233 and the glyph ink 25-231, so
+measurement tracks the rendering within antialiasing tolerance.
+
+Two controls, because "no text" and "no font" look identical on screen:
+asking for a nonexistent font asset drops the title row from 41 white pixels
+to 0 AND paints the red failure bar, and a zero measured width paints it too.
+
+The failure mode this guards against is quiet: with an empty font collection
+Skia has no typeface to shape with and text draws nothing at all, with no
+error anywhere.
 
 ### Getting there took four bugs, three of them mine
 

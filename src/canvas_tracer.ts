@@ -22,6 +22,16 @@ import * as ffi from "../../scriptc-game/host/ffi.js";
  * until the host wants the next one. Implemented in cart_main.c. */
 declare function sg_present_frame(): number;
 
+/* Register a font from a cart asset. A cart has no filesystem, so
+ * scriptc-game's path-based fontRegister cannot be used; see cart_core.cpp.
+ * Returns 0 on success. */
+declare function sg_cart_font_from_asset(path: string, alias: string): number;
+
+/* Fonts must be registered BEFORE any fillText: with an empty collection
+ * Skia has no typeface to shape with and text draws nothing at all, with no
+ * error anywhere. */
+const fontRc = sg_cart_font_from_asset("DejaVuSans.ttf", "sans-serif");
+
 const W = ffi.screenWidth();
 const H = ffi.screenHeight();
 const ctx = new Context2D(ffi.screenCanvas(), 0);
@@ -81,4 +91,20 @@ for (;;) {
   ctx.fillStyle = "#ffffff";
   ctx.font = "24px sans-serif";
   ctx.fillText("scriptc canvas 2d", 24, 40);
+
+  /* measureText exercises SHAPING (HarfBuzz), not just rasterisation: a
+   * stack that can draw glyphs but not measure them would pass every check
+   * above. The underline is drawn to the measured width, so a wrong metric
+   * is visible rather than silent. */
+  const tw = ctx.measureText("scriptc canvas 2d").width;
+  ctx.fillStyle = "#7cf7c4";
+  ctx.fillRect(24, 48, tw, 2);
+
+  /* A red bar when the font failed to register, so a text-less frame is
+   * never mistaken for a font that simply did not draw. Also flags a
+   * zero-width measurement, which is what a shaping failure looks like. */
+  if (fontRc !== 0 || tw <= 0) {
+    ctx.fillStyle = "#ff0000";
+    ctx.fillRect(0, H - 12, W, 12);
+  }
 }

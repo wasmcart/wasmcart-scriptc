@@ -140,5 +140,11 @@ WASM_OPT="${WASM_OPT:-$(dirname "$(command -v emcc)")/../bin/wasm-opt}"
   --enable-mutable-globals --enable-simd \
   -O2 "$OUT/canvas-pre.wasm" -o "$OUT/canvas.wasm"
 
-ls -la "$OUT/canvas.wasm"
-echo "built $OUT/canvas.wasm"
+# Pack with assets: the font is loaded through the host asset API rather
+# than embedded, since a cart has no filesystem for a path-based register.
+node "$HERE/../wasmcart/bin/wasmcart.js" pack \
+  --wasm "$OUT/canvas.wasm" --assets "$HERE/assets" \
+  --output "$HERE/canvas.wasc" >/dev/null
+
+ls -la "$OUT/canvas.wasm" "$HERE/canvas.wasc"
+echo "built $HERE/canvas.wasc"
