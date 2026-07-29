@@ -321,46 +321,44 @@ verbatim, so an 800-wide game in a 640-wide buffer wraps every row: it
 rendered as four squeezed copies side by side rather than scaling or
 cropping.
 
-### Why audio is still silent
+### Audio, and the async rule
 
-`dodge` starts music with `fetch(...).then(...).then(decodeAudioData)`, and
-**no `.then` continuation runs at all** -- measured, with a probe cart that
-paints its stage into the framebuffer: it stays on stage 0.
+**dodge plays with music.** The full
+`fetch -> arrayBuffer -> decodeAudioData -> BufferSource` chain completes:
+peak 0.463 where it was 0.0000, RMS 0.099, non-constant waveform starting
+at frame 12 once the decode finishes.
 
-The first cause is fixed. scriptc's fibers are built on ucontext, and
-Emscripten ships `swapcontext`/`makecontext` as do-nothing stubs, so a
-spawned fiber never ran. scriptc `6ce125a` gives it real
-`emscripten_fiber_t` fibers (Asyncify-backed), verified in isolation before
-being wired in.
+The fix is a one-line switch, and the reasoning behind it is the
+interesting part. `queueTask` defers every resolution to a later turn --
+correct by default, and what makes `img.onload` fire after `src =`. But it
+assumes the host can suspend a continuation that attached before the
+promise settled.
 
-**Correction: `sg_present` IS the frame boundary.** An earlier note here
-claimed it was never called. That was a broken probe, not a broken model --
-it painted a counter into the framebuffer that the game then overwrote.
-Read through an exported wasm function instead, the numbers are exact:
-5 host frames give 5 `sg_present` calls and 5 `scr_loop_run` calls, and
-`wc_frame_yield` fires twice per frame (once resuming, once suspending),
-which is what a rewind-into-the-yield looks like.
+A cart cannot suspend one. So deferring is not a fidelity win here, it is a
+guarantee the continuation never runs: the `.then` attaches on frame 1,
+the resolution lands on frame 2, and the fiber in between has nothing to
+park on.
 
-So the turn IS ending and the microtask queue IS being drained. The queue
-is simply always empty: `scr_loop_has_ready()` is false on every frame.
+`__setInlineTasks(true)` settles synchronously instead. **The API does not
+change** -- game code still writes `fetch(...).then(...)` -- and the
+backing store genuinely is synchronous, since assets come out of the
+`.wasc`. Only the artificial delay goes away.
 
-Narrowed to the smallest case that still fails: a bare
-`Promise.resolve(1).then(v => { stage = v })` in a cart, with no fetch, no
-assets and no I/O, never runs its continuation. So the problem is not the
-fetch path, not the asset store, and not the drain -- it is that `.then`
-on an already-resolved promise never enqueues anything under wasm.
+With a control: flipping inline mode off rebuilds a cart that aborts with
+`awaiting a pending promise needs fiber suspension`, and flipping it back
+restores peak 0.463.
 
-Asyncify is confirmed applied (all five `asyncify_*` exports present) and
-the emscripten-fiber path is linked, so the remaining suspect is how
-`scr_async_spawn`'s fiber interacts with the cart's own outer Asyncify
-unwind -- two nested users of the same transform.
+### The fiber dead end, recorded
 
-Also fixed on the way: `sg_mail_set` was an undefined import (host-stubbed
-to -1), so any decode or GL error reported nothing at all. `cart_core.cpp`
-exports it now.
+`emscripten_fiber_t` looks like the answer and is not: `emscripten_fiber_swap`
+is an **import** satisfied by emscripten's JS glue, so a `STANDALONE_WASM`
+cart links it undefined and the host stubs it -- the same silent failure,
+one layer down. Confirmed by disassembly.
 
-The audio TIER is fine -- the standalone audio cart renders a
-spectrum-verified chord -- so none of this is the graph.
+Worth knowing for later: a standalone module **can** suspend its own code
+with the raw asyncify primitives (verified: unwind at a park, rewind after,
+stage 1 then 2). What blocks using that for promise parks is that asyncify
+has one global state and the cart already spends it on the frame yield.
 
 ## Where this goes next
 
@@ -373,9 +371,9 @@ scriptc-game's `web/` tier are already solved.
 
 The order that makes sense from here:
 
-1. Microtasks without swapcontext, which is what silences dodge's music
-   and would block any promise-based asset load.
-2. Keyboard and pointer input: the pad path works, the rest is unwired.
+1. Keyboard and pointer input: the pad path works, the rest is unwired.
+2. A second asyncify context, if a cart ever needs to await genuinely
+   pending I/O rather than a synchronous backend.
 
 Worth stating plainly: `wasmcart-jsgame` already runs real three.js as a cart
 through QuickJS. This lane's argument is not "3D in a cart is possible": it

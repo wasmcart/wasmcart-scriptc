@@ -24,12 +24,24 @@
 import { boot, startSync, runFrameSync, HostOptions, FrameState }
   from "../../scriptc-game/host/runtime.js";
 import { installCartAssets } from "./cart_assets.js";
+import { __setInlineTasks } from "../../scriptc-game/web/globals.js";
 
 /* Before anything reads an asset. ES imports hoist, so the game module's
  * top level has already run by the time this statement executes -- which is
  * fine, because a game's asset loading belongs in its `load` handler, the
  * same rule a browser page follows. */
 installCartAssets();
+
+/* A cart cannot park a fiber (no ucontext, and emscripten's fiber swap is a
+ * JS-glue import a standalone module does not get). Deferring a resolution
+ * to a later turn would therefore mean the continuation NEVER runs, because
+ * the `.then` attaches before the promise settles and then has nothing to
+ * suspend on.
+ *
+ * Inline mode settles synchronously instead. The API is unchanged -- game
+ * code still writes fetch(...).then(...) -- and the backing store here IS
+ * synchronous (assets come out of the .wasc), so nothing is being faked. */
+__setInlineTasks(true);
 
 const opts = new HostOptions();
 opts.width = 800;
