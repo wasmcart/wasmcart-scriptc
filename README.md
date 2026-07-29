@@ -19,7 +19,8 @@ question.
 | scriptc C runtime under Emscripten | 50 of 54 files |
 | TS-owned game loop in a cart | works, via wasmcart's yield protocol |
 | Pixels driven by compiled TS | verified to the pixel, with a control |
-| Canvas 2D / WebGL / audio | not started |
+| Canvas 2D | **blocked upstream**, see below |
+| WebGL / audio | not started |
 
 ```sh
 ./build.sh     # -> build/cart.wasm
@@ -106,6 +107,48 @@ It comes with a control that must fail. Changing the step from 2 to 5 in
 `verify.sh` reports the failure. Without that, "the pixels match" cannot be
 distinguished from a harness reading a stale file.
 
+## Canvas 2D: built, and blocked on one compiler detail
+
+`build-canvas.sh` builds it and it links (7MB with Skia). Everything on the
+scriptc-game side ports cleanly:
+
+- `shim/sg_skia_gen.cpp` and `shim/sg_skia_extra.cpp` compile under emcc
+  **unmodified** against wasmcart-skia's `libskiac.a`.
+- `src/cart_core.cpp` replaces only `shim/sg_core.cpp` (the SDL window,
+  renderer and streaming texture) with a Skia surface copied into the cart
+  framebuffer. That is ~130 lines.
+- `src/canvas_tracer.ts` imports scriptc-game's real `web/canvas/context.js`.
+  Not a reimplementation: the same file a native build uses.
+
+**It traps at runtime with "memory access out of bounds", and the cause is in
+scriptc, not here.** Its LLVM IR hardcodes 64-bit `size_t`:
+
+```
+declare ptr @calloc(i64, i64)
+declare ptr @scr_arr_new(i32, i64)
+declare i32 @sg_text_set_font(ptr, i64, double, i32, i32)
+```
+
+wasm32 wants `i32` for all of those. wasm-ld reports each as a "function
+signature mismatch" warning and links anyway; the calls then read out of
+bounds. Setting `SCRIPTC_TARGET` to a 32-bit triple (`x86-linux-gnu`,
+`wasm32-wasi`) does not change the widths, so this is not a flag away.
+
+The framebuffer tracer is unaffected because it makes **zero** allocator
+calls and passes no spans: `grep -c 'call.*@calloc\|call.*@scr_arr_new'` on
+its IR is 0. Anything that allocates or takes a string crosses the boundary.
+
+What this needs upstream is for scriptc to lower `size_t`, the FFI `string`
+and `bytes` length, and its allocator signatures to pointer width rather than
+always 64-bit. That is a scriptc feature request, and per the standing rule
+about upstream work it needs monteslu's sign-off before filing.
+
+Two changes landed in scriptc-game while getting here, both green on the
+native suite and worth having regardless: FFI span lengths are `uint32_t`
+instead of `size_t` (identical natively, correct on wasm32), and
+`SG_EXTRA_SHIM` lets `gen-ffi` parse C signatures from a consumer's own shim
+sources.
+
 ## Where this goes next
 
 The interesting finding from the survey that preceded this: **`wasmcart-skia`
@@ -117,7 +160,9 @@ scriptc-game's `web/` tier are already solved.
 
 The order that makes sense from here:
 
-1. Canvas 2D, by linking `web/canvas/` against the WASM `libskiac.a`.
+1. The `size_t` width fix in scriptc. Canvas 2D is otherwise done and
+   waiting on it, and every later tier hits the same wall the moment it
+   allocates.
 2. WebGL2, mapping `web/webgl/context.ts` onto the cart's `gl` imports the
    way `wasmcart-jsgame/src/webgl_shim.c` does.
 3. threeTS-lite on top, which should need no changes if 2 is faithful.
