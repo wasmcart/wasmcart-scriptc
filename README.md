@@ -138,10 +138,11 @@ The framebuffer tracer is unaffected because it makes **zero** allocator
 calls and passes no spans: `grep -c 'call.*@calloc\|call.*@scr_arr_new'` on
 its IR is 0. Anything that allocates or takes a string crosses the boundary.
 
-What this needs upstream is for scriptc to lower `size_t`, the FFI `string`
-and `bytes` length, and its allocator signatures to pointer width rather than
-always 64-bit. That is a scriptc feature request, and per the standing rule
-about upstream work it needs monteslu's sign-off before filing.
+The fix belongs in scriptc: lower `size_t`, the FFI `string`/`bytes` length,
+and the allocator signatures to pointer width rather than always 64-bit.
+Written up with exact sites and a suggested shape in
+[SCRIPTC-32BIT.md](SCRIPTC-32BIT.md), for the monteslu fork. Not filed
+upstream.
 
 Two changes landed in scriptc-game while getting here, both green on the
 native suite and worth having regardless: FFI span lengths are `uint32_t`
