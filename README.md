@@ -21,7 +21,7 @@ question.
 | Pixels driven by compiled TS | verified to the pixel, with a control |
 | Canvas 2D | **works**: gradients, paths, curves, alpha, transforms |
 | Text (FreeType/HarfBuzz/ICU) | **works**, including `measureText` shaping |
-| WebGL2 | **partial**: cart loads, GL resolves, clears; no draws yet |
+| WebGL2 + threeTS-lite | **works**: lit, depth-tested 3D in a 456KB cart |
 | Audio | not started |
 
 ```sh
@@ -183,51 +183,52 @@ needed (the cart genuinely does not provide every symbol the runtime
 references), but it converts "you forgot to link something" into a runtime
 trap or, worse, a silently wrong value.
 
-## WebGL2: partial
+## WebGL2 and threeTS-lite
 
-`./build-gl.sh` produces a 456KB `.wasc` (no Skia is linked, unlike the
-canvas cart's 6.8MB). It loads, runs its loop, and the clear colour renders
-correctly through the host's GL. All 53 GL entry points resolve to the
-cart's `gl` module with none left in `env`.
+Working. `./build-gl.sh` produces a **456KB** `.wasc` (no Skia linked,
+against the canvas cart's 6.8MB) that renders a lit, rotating, depth-tested
+cube through scriptc-game's real `WebGLRenderer`, `Scene` and `Mesh`. The 3D
+tier is unmodified.
 
-**It does not draw yet.** The renderer clears each frame and then makes zero
-shader, buffer or draw calls. What is ruled out, each by probe rather than
-inspection: the mesh IS in `scene.meshes`, `mesh.visible` and
-`material.visible` are both true, `culledCount` is 0, `Matrix4` arithmetic
-and `invert()` are correct in isolation, and the asyncify rewind runs module
-setup exactly once (`setupRuns == 1`).
+Colours are checked, not eyeballed: with a control that changes only the
+material colour in the TypeScript, the sampled cube face moves from
+`(168,95,55)` to `(45,178,110)`.
 
 ### The bridge
 
 scriptc lowers `host/gl-ffi.ts` to plain external symbols, which emcc emits
 as imports from module `env`; wasmcart supplies GL under the module name
-`gl`. `src/gl_bridge.c` is generated from `wasmcart.h`: each `glXxx` is
-defined locally and forwards to a same-named `import_module("gl")` import.
-scriptc-game is unmodified.
+`gl`. `src/gl_bridge.c`, generated from `wasmcart.h`, defines each `glXxx`
+locally and forwards to a same-named `import_module("gl")` import.
 
 One detail worth keeping: the C++ GL shim must NOT force-include
 `wasmcart.h`. It includes `GLES3/gl3.h` itself, whose declarations have C++
 linkage and collide. The bridge alone does the redirect.
 
-### Another silent stub, and the worst one so far
+### Two bugs, both silent
 
-`sg_sqrt`, `sg_tan`, `sg_cos` and the rest of the math FFI live in
-scriptc-game's `shim/sg_skia_extra.cpp`, next to the Skia canvas helpers. A
-GL cart links no Skia, so excluding that file dropped the math with it, and
+**The math FFI was stubbed.** `sg_sqrt`, `sg_tan`, `sg_cos` live in
+scriptc-game's `shim/sg_skia_extra.cpp` next to the Skia helpers. A GL cart
+links no Skia, so excluding that file dropped the math with it, and
 `-sERROR_ON_UNDEFINED_SYMBOLS=0` turned every one into a host stub.
+`Math.tan(x)`, `Math.sqrt(x)` and `Math.cos(x)` all returned the SAME
+constant regardless of argument, so every camera matrix was garbage.
+`src/gl_support.c` supplies them.
 
-The symptom: `Math.tan(x)`, `Math.sqrt(x)` and `Math.cos(x)` all returned
-the SAME wrong constant regardless of argument. Every camera matrix was
-quietly garbage (projection[0] read 2.0 against an expected 0.974), and the
-frame came out empty with no error anywhere. `src/gl_support.c` supplies
-them, and the three now read exactly 0.57, 1.41 and 1.00.
+That was the third instance of that failure mode (`scr_regex.c`, then
+`libregexp.o`, then the math shim). The flag is necessary, but it converts
+"you forgot to link something" into a wrong value rather than a link error.
+**Start any new cart by diffing its undefined `env` imports against what it
+means to provide.**
 
-That is the third time this failure mode has cost real time
-(`scr_regex.c`, then `libregexp.o`, now the math shim). The flag is
-necessary -- a cart genuinely does not provide every symbol the runtime
-references -- but it converts "you forgot to link something" into a wrong
-value rather than a link error. **Any new cart should start by diffing its
-undefined `env` imports against what it means to provide.**
+**`instanceof` compared garbage.** `ScrVt.pre`/`post` are `size_t`, and
+`instanceof` is a preorder-interval test against them. The backend loaded
+them as `i64` regardless of target, so on wasm32 `post` landed in the high
+half of `pre`. It does not crash: it answers FALSE. `Scene.add()` dispatches
+on `instanceof` to pick a typed registry, so every mesh fell through to the
+plain-Object3D branch, was parented into `children`, registered in no draw
+list, and the renderer cleared correctly and drew nothing. Fixed in
+`d494e92` on the fork.
 
 ## Where this goes next
 
@@ -240,10 +241,9 @@ scriptc-game's `web/` tier are already solved.
 
 The order that makes sense from here:
 
-1. Finish WebGL2: find why the renderer submits no draws even with correct
-   matrices and an unculled, visible mesh.
-2. threeTS-lite on top, which should need no changes once 1 is faithful.
-3. Audio.
+1. Audio, the last untouched tier.
+2. A real game, rather than a tracer: the examples in scriptc-game should
+   build as carts with no source changes.
 
 Worth stating plainly: `wasmcart-jsgame` already runs real three.js as a cart
 through QuickJS. This lane's argument is not "3D in a cart is possible": it
