@@ -207,6 +207,21 @@ __attribute__((import_module("env"), import_name("wc_load_asset")))
 extern "C" int wc_load_asset(const char* path, unsigned int path_len,
                              void* dest, unsigned int max_size);
 
+/* sg_font_register: the path-based entry point web/globals.ts's
+ * FontFace.load() calls.
+ *
+ * The native shim hands the path to Skia, which opens a file. A cart has no
+ * files, so this resolves the SAME path through the host asset API instead.
+ * That keeps `new FontFace("X", "url(DejaVuSans.ttf)")` working unchanged --
+ * without it the registration fails, the font collection stays empty, and
+ * every fillText draws nothing at all with only a one-line warning. */
+extern "C" int32_t sg_cart_font_from_asset(const uint8_t* path, uint32_t path_len,
+                                           const uint8_t* alias, uint32_t alias_len);
+
+extern "C" int32_t sg_font_register(const uint8_t* path, uint32_t path_len) {
+    return sg_cart_font_from_asset(path, path_len, nullptr, 0);
+}
+
 extern "C" int32_t sg_cart_font_from_asset(const uint8_t* path, uint32_t path_len,
                                            const uint8_t* alias, uint32_t alias_len) {
     skiac_font_collection* fc = sg_fonts();
@@ -280,10 +295,23 @@ extern "C" void sg_cart_set_fb(uint32_t* fb, uint32_t px) { g_fb = fb; g_fb_px =
 
 extern "C" int32_t sg_cart_present(uint32_t* dest, uint32_t dest_px);
 
+/* Refreshed by the ABI shell so the RESUME side can update per-frame state
+ * that wc_render's body would otherwise set only once.
+ *
+ * This matters because an asyncify rewind does not replay wc_render: it
+ * restores the saved stack and lands directly back at the wc_frame_yield
+ * below. Anything wc_render does above scriptc_main therefore runs exactly
+ * once, on the first frame. Setting the clock there left performance.now()
+ * frozen at its frame-1 value, so every dt was 0 and the game rendered one
+ * frame and then sat perfectly still -- with no error at all. */
+extern "C" void sg_cart_refresh_frame(void);
+
 extern "C" int32_t sg_present(int32_t unused) {
     (void)unused;
     if (g_fb) sg_cart_present(g_fb, g_fb_px);
     wc_frame_yield();
+    /* Resumed: the host has advanced its clock and written new pad state. */
+    sg_cart_refresh_frame();
     return SG_OK;
 }
 

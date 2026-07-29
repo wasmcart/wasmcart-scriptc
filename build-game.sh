@@ -27,14 +27,14 @@ command -v emcc >/dev/null 2>&1 || { echo "build-canvas.sh: emcc not on PATH" >&
 
 mkdir -p "$OBJ"
 
-CXXF="-O2 -std=c++20 -fno-exceptions -fno-rtti -DSK_RELEASE -I$SG/shim -I$SKIA/include -I$SKIA_HDRS"
+CXXF="-O2 -std=c++20 -fno-exceptions -fno-rtti -DSK_RELEASE -DSG_NO_FONT_PATH -I$SG/shim -I$SKIA/include -I$SKIA_HDRS"
 
 # ---- 1. the FFI manifest ---------------------------------------------
 #
 # gen-ffi walks the TS import graph and needs the C signatures for every
 # symbol it finds. Ours live outside scriptc-game, hence SG_EXTRA_SHIM.
 echo "==> ffi manifest"
-( cd "$SG" && SG_EXTRA_SHIM="$HERE/src/game_cart.c:$HERE/src/cart_core.cpp:$HERE/src/cart_audio.cpp:$HERE/src/gl_support.c" \
+( cd "$SG" && SG_EXTRA_SHIM="$HERE/src/game_cart.c:$HERE/src/cart_core.cpp:$HERE/src/cart_audio.cpp:$HERE/src/cart_input.cpp:$HERE/src/gl_support.c" \
   node codegen/gen-ffi.js linux-x86_64 "$HERE/src/game_entry.ts" >/dev/null )
 
 # Strip the native link inputs. scriptc runs a real link to produce the IR,
@@ -110,6 +110,11 @@ emcc -O2 -c "$SG/shim/sg_tables.c" -I"$SG/shim" -o "$OBJ/sg_tables.o"
 # own decoder shim (mp3/wav/ogg/flac) which is pure C and ports unchanged.
 WEBAUDIO="${WEBAUDIO_A:-$HERE/../wasmcart-jsgame/obj/libwebaudio.a}"
 em++ -O2 -std=c++20 -fno-exceptions -fno-rtti -c "$HERE/src/cart_audio.cpp" -o "$OBJ/cart_audio.o"
+
+# Input. Without it sg_poll_event is an undefined import the host stubs to
+# -1, and input.pump()'s "drain until EV_NONE" loop never terminates.
+em++ -O2 -std=c++20 -fno-exceptions -fno-rtti -I"$HERE/src" \
+  -c "$HERE/src/cart_input.cpp" -o "$OBJ/cart_input.o"
 # dr_mp3/dr_wav/stb_vorbis live in webaudio-node's vendor dir, the same
 # place the native build takes them from.
 WA_SRC="${WEBAUDIO_SRC:-$HERE/../webaudio-node/src}"
@@ -128,7 +133,7 @@ emcc -O2 -c "$HERE/src/game_cart.c" -I"$HERE/src" -o "$OBJ/game_cart.o"
 echo "==> emcc: link game.wasm"
 emcc -O2 "$OBJ/game_cart.o" "$OBJ/cart_core.o" "$OBJ/tracer.o" \
   "$OBJ/sg_skia_gen.o" "$OBJ/sg_skia_extra.o" "$OBJ/sg_tables.o" \
-  "$OBJ/cart_audio.o" "$OBJ/sg_audio_decode.o" "$WEBAUDIO" \
+  "$OBJ/cart_audio.o" "$OBJ/cart_input.o" "$OBJ/sg_audio_decode.o" "$WEBAUDIO" \
   "${rt_objs[@]}" \
   "$SKIA/libskiac.a" "$SKIA/libskia.a" "$SKIA/libskshaper.a" \
   "$SKIA/libskparagraph.a" "$SKIA/libskunicode_core.a" "$SKIA/libskunicode_icu.a" \

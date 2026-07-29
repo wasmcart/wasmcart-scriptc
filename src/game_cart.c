@@ -13,8 +13,8 @@
 #include <string.h>
 #include "wasmcart.h"
 
-#define CART_WIDTH   640
-#define CART_HEIGHT  360
+#define CART_WIDTH   800
+#define CART_HEIGHT  600
 
 static wc_info_t      info;
 static wc_host_info_t host_info;
@@ -60,6 +60,28 @@ extern int scriptc_main(int argc, char **argv);
  * handed over once at init and the shell never pumps a frame itself. */
 extern void sg_cart_set_fb(uint32_t *fb, uint32_t px);
 extern void sg_cart_set_clock(double ms);
+extern void sg_cart_set_pads(const wc_pad_t *pads);
+extern void sg_cart_audio_pump(uint32_t frames);
+
+/* The audio ring, owned by cart_audio.cpp. Published below so the host
+ * drains it; leaving these zero (as the canvas shell this was copied from
+ * does) means the pump fills a buffer nobody reads and the game is silent
+ * with no error. */
+extern float    g_audio_ring[];
+extern uint32_t g_audio_write;
+#define AUDIO_CAP 8192
+
+/* Called at the START of each frame -- from wc_render on frame 1, and from
+ * sg_present's resume side on every frame after, since the asyncify rewind
+ * skips wc_render's body entirely. */
+void sg_cart_refresh_frame(void) {
+    sg_cart_set_clock(time_info.time_ms);
+    sg_cart_set_pads(pads);
+    /* One 60Hz frame of audio at 48kHz. The tracer carts pump from their
+     * own loop; a real game's loop is runtime.ts's, so the pump rides the
+     * same frame boundary as the clock. */
+    sg_cart_audio_pump(800);
+}
 
 /* ---- wasmcart ABI ---------------------------------------------------- */
 
@@ -69,16 +91,16 @@ wc_info_t *wc_get_info(void) {
     info.width           = CART_WIDTH;
     info.height          = CART_HEIGHT;
     info.fb_ptr          = (uint32_t)(uintptr_t)framebuffer;
-    info.audio_ptr       = 0;
-    info.audio_cap       = 0;
-    info.audio_write_ptr = 0;
+    info.audio_ptr       = (uint32_t)(uintptr_t)g_audio_ring;
+    info.audio_cap       = AUDIO_CAP;
+    info.audio_write_ptr = (uint32_t)(uintptr_t)&g_audio_write;
     info.input_ptr       = (uint32_t)(uintptr_t)pads;
     info.save_ptr        = 0;
     info.save_size       = 0;
     info.time_ptr        = (uint32_t)(uintptr_t)&time_info;
     info.host_info_ptr   = (uint32_t)(uintptr_t)&host_info;
-    info.flags           = 0;
-    info.audio_sample_rate = 0;
+    info.flags           = WC_FLAG_AUDIO_F32;
+    info.audio_sample_rate = 48000;
     info.pointer_ptr     = 0;
     info.keys_ptr        = 0;
     info.gpu_api         = 0;        /* 2D framebuffer */
@@ -100,9 +122,9 @@ void wc_render(void) {
     /* UNCONDITIONAL entry, every frame: the asyncify rewind replays this
      * call to reach the suspended yield. A first-frame guard here would
      * leave the rewind nothing to replay and freeze the cart on frame 1. */
-    /* The host's clock, so performance.now() and every dt advance. Read
-     * before re-entering: a rewind resumes inside the game's frame. */
-    sg_cart_set_clock(time_info.time_ms);
+    /* First frame only: every later frame refreshes from sg_present's
+     * resume side instead, because a rewind never replays this body. */
+    sg_cart_refresh_frame();
 
     static char *argv0 = "cart";
     static char *argv[2] = { NULL, NULL };

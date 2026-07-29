@@ -271,46 +271,68 @@ arrive one frame late and the first frame silent.
 Offline rendering (`sg_audio_render_offline`) writes a file and is reported
 as unavailable rather than stubbed silently.
 
-## A real game: in progress, not working
+## A real game: dodge
 
 `./build-game.sh` builds `examples/dodge` -- the reference game, with
-sprites, mp3 music, SFX, text and gamepad input -- as a 6.9MB cart. It
-builds and links. **It does not run yet: loading hangs before the first
-frame.**
+sprites, mp3 music, SFX, text and gamepad input -- as a 6.9MB cart. **It
+plays.** The score advances, coins spawn and spin, the ship responds to pad
+input, and the HUD, grid and DejaVu text all render at 800x600.
 
-What is done, and reusable:
+Not fully: **music and SFX are silent**, and that is a known cause rather
+than an open question. See below.
 
-- **Assets.** `host/resources.ts` now takes a pluggable `AssetStore`
-  (scriptc-game `a9045e8`). Native keeps `node:fs`; `src/cart_assets.ts`
-  installs a store backed by the host's `wc_asset_size`/`wc_load_asset`, so
-  `fetch("music.mp3")` and `img.src = "player.png"` resolve unchanged. FFI
-  format 1 has no bytes-RETURN class, so reading is size-then-fill.
-- **The rest of `sg_core`.** `sg_ticks`, `sg_delay`, `sg_display_hz`,
-  fullscreen and PNG-save stubs. The clock matters most: it comes from the
-  host's `wc_time_t`, and a stubbed one means `performance.now()` never
-  advances and every dt is zero -- a frozen game with no error.
-- **`sg_present` as the frame boundary.** `host/runtime.ts` already calls
-  `ffi.present()` exactly once per frame at the right point, so the cart
-  yields from THERE rather than forking the loop.
+The game source is unmodified. What the cart supplies is the host side:
 
-### The await problem
+- **`cart_assets.ts`** -- an `AssetStore` (scriptc-game `a9045e8`) over the
+  host asset API, so `fetch("music.mp3")` and `img.src = "player.png"`
+  resolve out of the `.wasc`. Reading is size-then-fill; FFI format 1 has
+  no bytes-RETURN class.
+- **`cart_input.cpp`** -- `sg_input` over `wc_pad_t`.
+- **`sg_font_register`** redirected to the asset store, guarded upstream by
+  `SG_NO_FONT_PATH` (scriptc-game `2634257`) so the native shim is
+  untouched.
+- **The rest of `sg_core`** -- clock, delay, display_hz, fullscreen and
+  PNG-save stubs.
 
-`run()` is `async` and ends each iteration with `await`. That is correct on
-a real event loop and impossible here: a scriptc async task suspends with
-`swapcontext`, which does not exist under wasm. The host stubs it, the task
-never switches stacks, and asyncify cannot rewind into it -- the cart traps
-with "table index is out of bounds" from `scriptc_main`, which reads like a
-codegen fault rather than an `await`.
+### Four bugs, and a pattern worth stating
 
-`runFrameSync` (same commit) is `run()`'s body without the await, and the
-cart drives it a frame at a time. That fixed the trap.
+**1. The hang was an infinite loop, not a deadlock.** `input.pump()` drains
+events with `while (kind !== EV_NONE)`. `EV_NONE` is 0, and wasmcart's host
+auto-stubs unknown `env` imports with **`() => -1`** (CartHost.js:705), so
+an unlinked `sg_poll_event` returned -1 forever. The cart spun inside frame
+1, which from outside looks exactly like a hang during load.
 
-### Where it stands
+That is the **fourth** time a missing object file has surfaced as a wrong
+value rather than a link error, and the worst of the four: the others gave
+garbage numbers, this one gave an infinite loop.
 
-With the sync loop the trap is gone and the hang replaced it: `host.load()`
-does not return, so the failure is now at module scope rather than in the
-frame path. Not yet diagnosed. The tracer carts (canvas, GL, audio) are
-unaffected and still build and run.
+**2. `await` cannot cross an asyncify yield.** `run()` is async and ends
+each frame with `await`; a scriptc async task suspends via `swapcontext`,
+which does not exist under wasm and is host-stubbed. `runFrameSync`
+(scriptc-game `a9045e8`) is the same body without it.
+
+**3. A rewind does not replay `wc_render`.** Setting the clock and pad
+state there ran once, on frame 1, so `performance.now()` never advanced,
+every dt was 0, and the game drew one frame and sat perfectly still. Both
+now refresh from `sg_present`'s resume side.
+
+**4. The framebuffer must match the game's resolution.** Rows are copied
+verbatim, so an 800-wide game in a 640-wide buffer wraps every row: it
+rendered as four squeezed copies side by side rather than scaling or
+cropping.
+
+### Why audio is silent
+
+`dodge` starts music with `fetch(...).then(...).then(decodeAudioData)`.
+Those continuations are **microtasks**, and scriptc's microtask queue is
+part of the same `scr_async.c` fiber machinery that needs `swapcontext`.
+`__drainTasks()` runs queued host tasks synchronously, but a `.then` chain
+still needs a turn to end.
+
+The audio tier itself works -- the standalone audio cart renders a verified
+chord -- so this is the promise plumbing, not the graph. Fixing it means
+either a synchronous microtask drain in the runtime or `swapcontext` for
+wasm.
 
 ## Where this goes next
 
@@ -323,8 +345,9 @@ scriptc-game's `web/` tier are already solved.
 
 The order that makes sense from here:
 
-1. Finish the dodge cart: find why load hangs at module scope.
-2. Input: the cart pad state is published but nothing reads it yet.
+1. Microtasks without swapcontext, which is what silences dodge's music
+   and would block any promise-based asset load.
+2. Keyboard and pointer input: the pad path works, the rest is unwired.
 
 Worth stating plainly: `wasmcart-jsgame` already runs real three.js as a cart
 through QuickJS. This lane's argument is not "3D in a cart is possible": it
