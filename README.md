@@ -271,6 +271,47 @@ arrive one frame late and the first frame silent.
 Offline rendering (`sg_audio_render_offline`) writes a file and is reported
 as unavailable rather than stubbed silently.
 
+## A real game: in progress, not working
+
+`./build-game.sh` builds `examples/dodge` -- the reference game, with
+sprites, mp3 music, SFX, text and gamepad input -- as a 6.9MB cart. It
+builds and links. **It does not run yet: loading hangs before the first
+frame.**
+
+What is done, and reusable:
+
+- **Assets.** `host/resources.ts` now takes a pluggable `AssetStore`
+  (scriptc-game `a9045e8`). Native keeps `node:fs`; `src/cart_assets.ts`
+  installs a store backed by the host's `wc_asset_size`/`wc_load_asset`, so
+  `fetch("music.mp3")` and `img.src = "player.png"` resolve unchanged. FFI
+  format 1 has no bytes-RETURN class, so reading is size-then-fill.
+- **The rest of `sg_core`.** `sg_ticks`, `sg_delay`, `sg_display_hz`,
+  fullscreen and PNG-save stubs. The clock matters most: it comes from the
+  host's `wc_time_t`, and a stubbed one means `performance.now()` never
+  advances and every dt is zero -- a frozen game with no error.
+- **`sg_present` as the frame boundary.** `host/runtime.ts` already calls
+  `ffi.present()` exactly once per frame at the right point, so the cart
+  yields from THERE rather than forking the loop.
+
+### The await problem
+
+`run()` is `async` and ends each iteration with `await`. That is correct on
+a real event loop and impossible here: a scriptc async task suspends with
+`swapcontext`, which does not exist under wasm. The host stubs it, the task
+never switches stacks, and asyncify cannot rewind into it -- the cart traps
+with "table index is out of bounds" from `scriptc_main`, which reads like a
+codegen fault rather than an `await`.
+
+`runFrameSync` (same commit) is `run()`'s body without the await, and the
+cart drives it a frame at a time. That fixed the trap.
+
+### Where it stands
+
+With the sync loop the trap is gone and the hang replaced it: `host.load()`
+does not return, so the failure is now at module scope rather than in the
+frame path. Not yet diagnosed. The tracer carts (canvas, GL, audio) are
+unaffected and still build and run.
+
 ## Where this goes next
 
 The interesting finding from the survey that preceded this: **`wasmcart-skia`
@@ -282,8 +323,7 @@ scriptc-game's `web/` tier are already solved.
 
 The order that makes sense from here:
 
-1. A real game, rather than a tracer: the examples in scriptc-game should
-   build as carts with no source changes.
+1. Finish the dodge cart: find why load hangs at module scope.
 2. Input: the cart pad state is published but nothing reads it yet.
 
 Worth stating plainly: `wasmcart-jsgame` already runs real three.js as a cart

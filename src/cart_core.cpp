@@ -107,6 +107,82 @@ extern "C" int32_t sg_canvas_release(uint32_t hc) {
  * and defining it again is a duplicate-symbol link error. Only the symbols
  * unique to sg_core.cpp belong in this file. */
 
+/* ---- assets ---------------------------------------------------------
+ *
+ * host/resources.ts reads game files with node:fs, which a cart has none of.
+ * These expose the host's asset API instead, in the only shape FFI format 1
+ * allows: it has no bytes-RETURN class, so a caller asks for the size,
+ * allocates, and passes the buffer in to be filled.
+ *
+ * Paths are the same relative URLs a game already writes ("player.png"),
+ * resolved by the host against the .wasc's asset directory. */
+__attribute__((import_module("env"), import_name("wc_asset_size")))
+extern "C" int wc_asset_size(const char* path, unsigned int path_len);
+__attribute__((import_module("env"), import_name("wc_load_asset")))
+extern "C" int wc_load_asset(const char* path, unsigned int path_len,
+                             void* dest, unsigned int max_size);
+
+/** Byte length of an asset, or -1 when it does not exist. */
+extern "C" int32_t sg_cart_asset_size(const uint8_t* path, uint32_t path_len) {
+    char p[512];
+    if (path_len >= sizeof(p)) return -1;
+    memcpy(p, path, path_len);
+    p[path_len] = 0;
+    return wc_asset_size(p, path_len);
+}
+
+/** Fills `dest` with the asset; returns the byte count, or -1 on failure. */
+extern "C" int32_t sg_cart_asset_read(const uint8_t* path, uint32_t path_len,
+                                      const uint8_t* dest, uint32_t dest_len) {
+    char p[512];
+    if (path_len >= sizeof(p)) return -1;
+    memcpy(p, path, path_len);
+    p[path_len] = 0;
+    return wc_load_asset(p, path_len, (void*)dest, dest_len);
+}
+
+/* ---- timing and window stubs ----------------------------------------
+ *
+ * The rest of shim/sg_core.cpp's surface. host/runtime.ts and web/globals.ts
+ * call these on every frame, so a missing definition becomes a host-stubbed
+ * import returning a constant -- which for a CLOCK means performance.now()
+ * never advances and every dt is zero. That is a frozen game with no error,
+ * the same silent-stub failure mode as the math FFI.
+ *
+ * The clock is the host's: it writes time_ms into the wc_time_t the cart
+ * publishes, once per frame, before wc_render. sg_cart_set_clock hands that
+ * to us so sg_ticks can report it. */
+static double g_now_ms;
+
+extern "C" void sg_cart_set_clock(double ms) { g_now_ms = ms; }
+
+extern "C" double sg_ticks(int32_t unused) { (void)unused; return g_now_ms; }
+
+/* No sleeping in a cart: the host paces frames, and blocking here would
+ * stall wc_render rather than yield. */
+extern "C" void sg_delay(uint32_t ms) { (void)ms; }
+
+/* 0 means "unknown", which host/runtime.ts already handles by falling back
+ * to a 60Hz budget. Claiming a rate we cannot verify would mislabel every
+ * hitch. */
+extern "C" uint32_t sg_display_hz(int32_t unused) { (void)unused; return 0; }
+
+/* Fullscreen belongs to the host's window, not the cart. */
+extern "C" int32_t sg_set_fullscreen(int32_t on) { (void)on; return SG_ESKIA; }
+extern "C" int32_t sg_is_fullscreen(int32_t unused) { (void)unused; return 0; }
+
+/* No filesystem to write a PNG to. Reported as failure rather than
+ * pretending to succeed. */
+extern "C" int32_t sg_surface_save_png(uint32_t hs, const uint8_t* path, uint32_t len) {
+    (void)hs; (void)path; (void)len;
+    mail_set("screenshots are unavailable in a cart");
+    return SG_ESKIA;
+}
+
+/* Handle-table diagnostics; the real counters live in sg_tables.c. */
+extern "C" uint32_t sg_debug_live(uint32_t kind) { (void)kind; return 0; }
+extern "C" uint32_t sg_debug_high_water(uint32_t kind) { (void)kind; return 0; }
+
 /* ---- fonts ----------------------------------------------------------
  *
  * scriptc-game registers fonts by PATH (sg_font_register -> skiac's
@@ -182,6 +258,35 @@ extern "C" int32_t sg_cart_font_from_asset(const uint8_t* path, uint32_t path_le
  * matched and memcpy'd, which rendered a dark blue scene brown and an amber
  * square cyan -- correct geometry, every colour wrong, which reads as a
  * shader or gradient bug rather than a byte-order one. */
+/* sg_present IS the frame boundary for a cart.
+ *
+ * host/runtime.ts already calls ffi.present() exactly once per frame, at
+ * the right point: after the game has drawn and after any screenshot. So
+ * rather than restructuring run()'s `for(;;)` into something a cart can
+ * step -- which would fork the host runtime -- the cart yields from HERE.
+ * Copy the finished Skia frame into the cart framebuffer, suspend, and
+ * return when the host asks for the next frame.
+ *
+ * run() then loops forever exactly as it does natively, and runtime.ts
+ * needs no cart-specific code at all. */
+__attribute__((import_module("env"), import_name("wc_frame_yield")))
+extern "C" void wc_frame_yield(void);
+
+/* Set by the ABI shell so this file can reach the framebuffer it owns. */
+static uint32_t* g_fb;
+static uint32_t  g_fb_px;
+
+extern "C" void sg_cart_set_fb(uint32_t* fb, uint32_t px) { g_fb = fb; g_fb_px = px; }
+
+extern "C" int32_t sg_cart_present(uint32_t* dest, uint32_t dest_px);
+
+extern "C" int32_t sg_present(int32_t unused) {
+    (void)unused;
+    if (g_fb) sg_cart_present(g_fb, g_fb_px);
+    wc_frame_yield();
+    return SG_OK;
+}
+
 extern "C" int32_t sg_cart_present(uint32_t* dest, uint32_t dest_px) {
     if (!g_surface || !g_pixels) { mail_set("present before init"); return SG_ESKIA; }
 
