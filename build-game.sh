@@ -142,21 +142,22 @@ emcc -O2 "$OBJ/game_cart.o" "$OBJ/cart_core.o" "$OBJ/tracer.o" \
   "$SKIA/libzlib.a" "$SKIA/libskcms.a" \
   -o "$OUT/game-pre.wasm" \
   -sSTANDALONE_WASM -sERROR_ON_UNDEFINED_SYMBOLS=0 \
+  `# ASYNCIFY here, not as a separate binaryen pass: scr_async.c's fibers` \
+  `# are emscripten_fiber_t, which IS Asyncify, so the two must be the same` \
+  `# transform. ASYNCIFY_IMPORTS names the cart's frame yield so it stays` \
+  `# suspendable alongside the fiber swaps.` \
+  -sASYNCIFY -sASYNCIFY_IMPORTS='["env.wc_frame_yield"]' \
+  -sASYNCIFY_STACK_SIZE=65536 \
   -sALLOW_MEMORY_GROWTH -sINITIAL_MEMORY=134217728 -sSTACK_SIZE=4194304 \
   --no-entry \
   -sEXPORTED_FUNCTIONS='["_wc_get_info","_wc_init","_wc_render","_wc_yield_buffer","_sc_frame_count"]'
 
-echo "==> wasm-opt: asyncify around wc_frame_yield"
-WASM_OPT="${WASM_OPT:-$(dirname "$(command -v emcc)")/../bin/wasm-opt}"
-[ -x "$WASM_OPT" ] || WASM_OPT=wasm-opt
-"$WASM_OPT" --asyncify \
-  --pass-arg=asyncify-imports@env.wc_frame_yield \
-  --enable-nontrapping-float-to-int --enable-bulk-memory --enable-sign-ext \
-  --enable-mutable-globals --enable-simd \
-  -O2 "$OUT/game-pre.wasm" -o "$OUT/game.wasm"
+# No separate wasm-opt --asyncify step: emcc already applied it above, and
+# running the pass twice fails with "asyncify_get_state already exists".
+cp "$OUT/game-pre.wasm" "$OUT/game.wasm"
 
-# Pack with assets: the font is loaded through the host asset API rather
-# than embedded, since a cart has no filesystem for a path-based register.
+# Pack with the game's own assets: the cart reads them through the host
+# asset API, so this is what makes fetch()/Image src resolve.
 node "$HERE/../wasmcart/bin/wasmcart.js" pack \
   --wasm "$OUT/game.wasm" --assets "$SG/examples/dodge/public" \
   --output "$HERE/game.wasc" >/dev/null

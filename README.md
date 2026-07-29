@@ -321,18 +321,32 @@ verbatim, so an 800-wide game in a 640-wide buffer wraps every row: it
 rendered as four squeezed copies side by side rather than scaling or
 cropping.
 
-### Why audio is silent
+### Why audio is still silent
 
-`dodge` starts music with `fetch(...).then(...).then(decodeAudioData)`.
-Those continuations are **microtasks**, and scriptc's microtask queue is
-part of the same `scr_async.c` fiber machinery that needs `swapcontext`.
-`__drainTasks()` runs queued host tasks synchronously, but a `.then` chain
-still needs a turn to end.
+`dodge` starts music with `fetch(...).then(...).then(decodeAudioData)`, and
+**no `.then` continuation runs at all** -- measured, with a probe cart that
+paints its stage into the framebuffer: it stays on stage 0.
 
-The audio tier itself works -- the standalone audio cart renders a verified
-chord -- so this is the promise plumbing, not the graph. Fixing it means
-either a synchronous microtask drain in the runtime or `swapcontext` for
-wasm.
+The first cause is fixed. scriptc's fibers are built on ucontext, and
+Emscripten ships `swapcontext`/`makecontext` as do-nothing stubs, so a
+spawned fiber never ran. scriptc `6ce125a` gives it real
+`emscripten_fiber_t` fibers (Asyncify-backed), verified in isolation before
+being wired in.
+
+It is still not enough, and the reason is honest to state: the cart's frame
+loop never reaches `sg_present`. A probe counter there stays at zero while
+frames render and yield normally, so **the frame boundary is somewhere
+other than where this cart assumes it is** -- which also means the
+`scr_loop_run()` turn-drain added beside it never runs. That is the next
+thing to find, and it invalidates part of the model described above rather
+than merely being an unfinished detail.
+
+Also fixed on the way: `sg_mail_set` was an undefined import (host-stubbed
+to -1), so any decode or GL error reported nothing at all. `cart_core.cpp`
+exports it now.
+
+The audio TIER is fine -- the standalone audio cart renders a
+spectrum-verified chord -- so none of this is the graph.
 
 ## Where this goes next
 

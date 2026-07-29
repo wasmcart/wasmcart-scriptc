@@ -36,6 +36,13 @@ typedef struct {
 } wc_pad_t;
 
 // Time struct (20 bytes, 8-byte aligned)
+//
+// delta_ms is CLAMPED by the host (250ms in the reference hosts). Any stall
+// inflates a raw delta -- a GC pause, a disk hit, a breakpoint, a backgrounded
+// tab -- and integrating velocity by an unclamped dt moves an object a stall's
+// worth of distance in one step, through whatever it should have hit. Every
+// engine caps this for the same reason. time_ms stays consistent with the
+// deltas you were actually handed, and never runs backwards.
 typedef struct {
     double  time_ms;
     double  delta_ms;
@@ -176,10 +183,16 @@ typedef struct {
 
 // Cart info flags
 #define WC_FLAG_AUDIO_F32  (1 << 0)  // audio ring buffer uses float32 (default: int16)
-#define WC_FLAG_NET_WS     (1 << 1)  // cart wants WebSocket imports (ABI v3)
-#define WC_FLAG_NET_DC     (1 << 2)  // cart wants data channel imports (ABI v3)
+#define WC_FLAG_NET_PEER   (1 << 1)  // cart wants peer-connection imports (ABI v3)
+// (1 << 2) is RESERVED AND UNUSED - it was WC_FLAG_NET_DC before the WebSocket
+// and data-channel families merged into one peer-connection family. Hosts must
+// ignore it; carts must not set it. WC_FLAG_NET_PEER governs all networking.
 #define WC_FLAG_POINTER    (1 << 3)  // cart wants pointer input (ABI v3)
 #define WC_FLAG_KEYBOARD   (1 << 4)  // cart wants raw keyboard input (ABI v3)
+// Both of the following are OPT-IN and default OFF. A cart that sets neither is
+// byte-for-byte identical to one built before they existed - see SPEC.md.
+#define WC_FLAG_DEBUG      (1 << 5)  // cart exports wc_debug_state() (see wc_cart.h)
+#define WC_FLAG_DETERMINISTIC (1 << 6) // cart honors host deterministic mode
 
 // Info struct (returned by wc_get_info)
 typedef struct {
@@ -213,6 +226,18 @@ static inline void wc_log(const char* ptr, unsigned int len) { (void)ptr; (void)
 // Helper: log a string literal
 #define WC_LOG(s) wc_log(s, sizeof(s) - 1)
 
+// Optional debug annotation (OPT-IN, default OFF). Stamps {frame, id} into a
+// debug-capable host's event trace so a run or replay is navigable by event.
+// An UNCALLED import is not emitted into the wasm binary, so merely declaring
+// this keeps a cart with no call sites byte-identical. Keep call sites behind
+// your own debug #ifdef. Play-only hosts stub it; see SPEC.md "Debug events".
+#ifdef __wasm__
+__attribute__((import_module("env"), import_name("wc_debug_mark")))
+extern void wc_debug_mark(unsigned int id);
+#else
+static inline void wc_debug_mark(unsigned int id) { (void)id; }
+#endif
+
 // Optional host import: query gamepad device name
 // Returns bytes written to buf (0 if pad_id invalid or no name available).
 // The host provides the SDL controller name, Gamepad API id, or "Keyboard".
@@ -223,6 +248,153 @@ extern int wc_pad_name(unsigned int pad_id, char* buf, unsigned int buf_len);
 static inline int wc_pad_name(unsigned int pad_id, char* buf, unsigned int buf_len) {
     (void)pad_id; (void)buf; (void)buf_len; return 0;
 }
+#endif
+
+// --- Text input (ABI v3) ---
+// For name entry, chat, seeds -- anything where the player types CHARACTERS
+// rather than pressing game buttons.
+//
+// The raw keyboard ABI (WC_FLAG_KEYBOARD, wc_kb_on_down) reports HID
+// scancodes: physical key positions. That is right for gameplay and wrong for
+// text, because a scancode is not a character. Shift+2 is "@" on a US layout
+// and a quote mark on several European ones; e-acute has no scancode at all.
+// Rather than have every cart reimplement keyboard layouts, the host hands
+// over text the OS has ALREADY composed -- layout, shift, dead keys, compose
+// sequences and IME commits all applied.
+//
+// Cart export (optional):
+//   void wc_on_text(const char* utf8, uint32_t len);
+// The pointer is valid only for the duration of the call: copy what you need.
+// `utf8` is NOT null-terminated, and one call may carry several codepoints (an
+// IME commits a whole word at once), so always honour `len`.
+//
+// Host imports:
+//   void wc_text_input_begin(void);   start receiving text
+//   void wc_text_input_end(void);     stop
+//   unsigned int wc_text_input_active(void);
+//
+// Text input is OFF until the cart asks for it, and that is load-bearing on
+// two counts. On mobile it is what raises and dismisses the on-screen
+// keyboard. And while it is active a host suppresses gameplay key bindings --
+// otherwise typing "w" into a chat box also walks the player forward.
+//
+// Editing keys stay on the keyboard ABI: backspace, arrows and enter are key
+// presses, not characters, so a cart drawing its own text field reads those
+// through wc_kb_on_down and appends characters from wc_on_text.
+#ifdef __wasm__
+__attribute__((import_module("env"), import_name("wc_text_input_begin")))
+extern void wc_text_input_begin(void);
+__attribute__((import_module("env"), import_name("wc_text_input_end")))
+extern void wc_text_input_end(void);
+__attribute__((import_module("env"), import_name("wc_text_input_active")))
+extern unsigned int wc_text_input_active(void);
+#else
+static inline void wc_text_input_begin(void) {}
+static inline void wc_text_input_end(void) {}
+static inline unsigned int wc_text_input_active(void) { return 0; }
+#endif
+
+// --- Lifecycle (ABI v3) ---
+// Optional cart exports. Export any subset; the host skips the ones you omit.
+//
+//   void wc_on_suspend(void);       host is about to STOP calling wc_render
+//   void wc_on_resume(void);        host is about to start calling it again
+//   void wc_on_focus_lost(void);    still running, no longer the active window
+//   void wc_on_focus_gained(void);  active window again
+//
+// Suspend and focus are deliberately separate. Minimizing a window or hiding a
+// tab suspends the cart -- it stops running entirely. Alt-tabbing only takes
+// focus: the cart keeps rendering, which is what lets a game pause gameplay
+// without going dark. Conflating them means a game either cannot auto-pause on
+// alt-tab, or wrongly freezes when it should still be drawing.
+//
+// The host owns suspension. While suspended it does not call wc_render at all,
+// so a cart that exports NONE of these still behaves correctly -- it is simply
+// not running. You never have to handle lifecycle to be correct; you handle it
+// to be polite (pause audio, drop a netplay connection, flush state).
+//
+// The host also rebases the clock across a suspend, so the first resumed frame
+// reports a normal wc_time_t.delta_ms rather than the whole gap. Without that a
+// ten-minute background stint would arrive as a 600000ms delta and teleport
+// anything integrating velocity by dt straight through the world.
+//
+// Ordering is guaranteed: suspending emits wc_on_focus_lost before
+// wc_on_suspend, and resuming emits wc_on_resume before wc_on_focus_gained, so
+// the focus pair is always balanced across a round trip.
+//
+// Declare them like any other export:
+//   __attribute__((export_name("wc_on_suspend")))
+//   void wc_on_suspend(void) { audio_pause(); }
+
+// --- Loop inversion (ABI v3) ---
+// For engines ported from native code that own their main loop: they run
+// `while (running) { ... }` internally and never return, while wasmcart expects
+// wc_render() back once per frame.
+//
+// Build the cart with binaryen's asyncify pass targeting this import:
+//   emcc ... -s ASYNCIFY=1 -s ASYNCIFY_IMPORTS=wc_frame_yield
+// then call wc_frame_yield() once per iteration of your own loop. The host
+// unwinds the whole engine stack out of wc_render() and rewinds back to exactly
+// that point next frame: your loop never notices, and the host gets its frame.
+//
+// A cart using this MUST also export wc_yield_buffer(), returning a pointer to
+// a pre-initialized asyncify stack descriptor -- a {current, end} uint32 pair
+// pointing at a stack area big enough for the deepest yield. For example:
+//
+//   static uint8_t  yield_stack[4096];
+//   static uint32_t yield_desc[2];
+//   __attribute__((export_name("wc_yield_buffer")))
+//   uint32_t wc_yield_buffer(void) {
+//       yield_desc[0] = (uint32_t)yield_stack;
+//       yield_desc[1] = (uint32_t)yield_stack + sizeof(yield_stack);
+//       return (uint32_t)yield_desc;
+//   }
+//
+// A cart that does not export the asyncify functions never triggers any of
+// this; the call is a no-op. Hosts always provide the import.
+#ifdef __wasm__
+__attribute__((import_module("env"), import_name("wc_frame_yield")))
+extern void wc_frame_yield(void);
+#else
+static inline void wc_frame_yield(void) {}
+#endif
+
+// --- Rumble (ABI v3) ---
+// Rumble runs the opposite way to the rest of input: the cart drives it, so it
+// is a host import rather than a field in wc_pad_t.
+//
+// Capability is per-DEVICE, not per-platform, so always ask rather than assume:
+// an Xbox 360 pad reports rumble but no trigger rumble, and a keyboard-only
+// setup reports none at all. Calls on a pad without rumble are silent no-ops,
+// so it is safe (if wasteful) to skip the query.
+//
+// low  = low-frequency / "strong" motor (0.0 .. 1.0)
+// high = high-frequency / "weak" motor  (0.0 .. 1.0)
+// Values outside 0..1 are clamped by the host. duration_ms is capped at
+// WC_RUMBLE_MAX_MS: the host stops the motors on its own timer, so a cart that
+// crashes mid-effect still leaves the controller quiet. For sustained rumble,
+// re-arm each frame -- which also means rumble stops when the cart stops.
+#define WC_RUMBLE_MAX_MS 5000
+
+#ifdef __wasm__
+__attribute__((import_module("env"), import_name("wc_pad_has_rumble")))
+extern unsigned int wc_pad_has_rumble(unsigned int pad_id);
+
+__attribute__((import_module("env"), import_name("wc_pad_rumble")))
+extern void wc_pad_rumble(unsigned int pad_id, float low, float high,
+                          unsigned int duration_ms);
+
+__attribute__((import_module("env"), import_name("wc_pad_rumble_stop")))
+extern void wc_pad_rumble_stop(unsigned int pad_id);
+#else
+static inline unsigned int wc_pad_has_rumble(unsigned int pad_id) {
+    (void)pad_id; return 0;
+}
+static inline void wc_pad_rumble(unsigned int pad_id, float low, float high,
+                                 unsigned int duration_ms) {
+    (void)pad_id; (void)low; (void)high; (void)duration_ms;
+}
+static inline void wc_pad_rumble_stop(unsigned int pad_id) { (void)pad_id; }
 #endif
 
 // --- Asset API (ABI v2) ---
@@ -253,88 +425,102 @@ static inline int wc_load_asset(const char* path, unsigned int path_len,
 #define WC_LOAD_ASSET(s, dest, max) wc_load_asset(s, sizeof(s) - 1, dest, max)
 
 // --- Networking API (ABI v3, optional) ---
-// Set WC_FLAG_NET_WS / WC_FLAG_NET_DC in wc_info_t.flags to enable.
-// Manifest must also declare net.websocket / net.data-channel.
+// One family: peer connections. A connection may be a WebSocket to a server, a
+// WebRTC data channel, direct TCP, a relay, MQTT, or a serial cable - whatever
+// the host implements. The cart cannot tell and must not care. There is no
+// client/server split: which end dialed which is a host-side fact.
+//
+// Set WC_FLAG_NET_PEER in wc_info_t.flags AND have the manifest grant the
+// relevant transport class in its "net" object. Networking is the one
+// capability where both are required: reaching a remote machine is a
+// permission the packager grants, not one the cart may assert.
+//
+// Compile with -DWC_USE_NET_PEER to pull in the imports.
 
-#ifdef WC_USE_NET_WS
+// Connection state (wc_peer_state)
+#define WC_PEER_CONNECTING 0
+#define WC_PEER_OPEN       1
+#define WC_PEER_CLOSING    2
+#define WC_PEER_CLOSED     3
 
-// WebSocket imports (cart calls into host)
+// Transport properties (wc_peer_transport bitmask). Deliberately properties,
+// not a transport name: a name invites carts to branch on the implementation
+// this design exists to hide. WC_TRANSPORT_UNKNOWN means the host does not
+// characterize it - treat that as "assume nothing".
+#define WC_TRANSPORT_UNKNOWN     0x00
+#define WC_TRANSPORT_RELIABLE    0x01
+#define WC_TRANSPORT_ORDERED     0x02
+#define WC_TRANSPORT_LOW_LATENCY 0x04
+
+#ifdef WC_USE_NET_PEER
+
+// Peer imports (cart calls into host)
 #ifdef __wasm__
-__attribute__((import_module("env"), import_name("wc_ws_open")))
-extern int wc_ws_open(const char* url, unsigned int url_len);
+__attribute__((import_module("env"), import_name("wc_peer_open")))
+extern int wc_peer_open(const char* addr, unsigned int addr_len);
 
-__attribute__((import_module("env"), import_name("wc_ws_close")))
-extern void wc_ws_close(int conn_id, unsigned int code);
+__attribute__((import_module("env"), import_name("wc_peer_close")))
+extern void wc_peer_close(int peer_id);
 
-__attribute__((import_module("env"), import_name("wc_ws_send")))
-extern int wc_ws_send(int conn_id, const void* data, unsigned int len);
+__attribute__((import_module("env"), import_name("wc_peer_send")))
+extern int wc_peer_send(int peer_id, const void* data, unsigned int len);
 
-__attribute__((import_module("env"), import_name("wc_ws_send_text")))
-extern int wc_ws_send_text(int conn_id, const char* str, unsigned int len);
+__attribute__((import_module("env"), import_name("wc_peer_broadcast")))
+extern int wc_peer_broadcast(const void* data, unsigned int len);
 
-__attribute__((import_module("env"), import_name("wc_ws_state")))
-extern int wc_ws_state(int conn_id);
+__attribute__((import_module("env"), import_name("wc_peer_state")))
+extern int wc_peer_state(int peer_id);
+
+__attribute__((import_module("env"), import_name("wc_peer_count")))
+extern int wc_peer_count(void);
+
+__attribute__((import_module("env"), import_name("wc_peer_id")))
+extern int wc_peer_id(unsigned int index);
+
+__attribute__((import_module("env"), import_name("wc_peer_name")))
+extern int wc_peer_name(int peer_id, char* dest, unsigned int max_len);
+
+__attribute__((import_module("env"), import_name("wc_peer_transport")))
+extern int wc_peer_transport(int peer_id);
 #else
-static inline int wc_ws_open(const char* url, unsigned int url_len) {
-    (void)url; (void)url_len; return -1;
+static inline int wc_peer_open(const char* addr, unsigned int addr_len) {
+    (void)addr; (void)addr_len; return -1;
 }
-static inline void wc_ws_close(int conn_id, unsigned int code) {
-    (void)conn_id; (void)code;
-}
-static inline int wc_ws_send(int conn_id, const void* data, unsigned int len) {
-    (void)conn_id; (void)data; (void)len; return -1;
-}
-static inline int wc_ws_send_text(int conn_id, const char* str, unsigned int len) {
-    (void)conn_id; (void)str; (void)len; return -1;
-}
-static inline int wc_ws_state(int conn_id) {
-    (void)conn_id; return 3; /* CLOSED */
-}
-#endif
-
-// WebSocket exports (cart implements, host calls — all optional)
-// void wc_ws_on_open(int conn_id);
-// void wc_ws_on_message(int conn_id, const void* data, unsigned int len);
-// void wc_ws_on_message_text(int conn_id, const char* str, unsigned int len);
-// void wc_ws_on_close(int conn_id, unsigned int code);
-// void wc_ws_on_error(int conn_id);
-
-#endif // WC_USE_NET_WS
-
-#ifdef WC_USE_NET_DC
-
-// Data Channel imports (cart calls into host)
-#ifdef __wasm__
-__attribute__((import_module("env"), import_name("wc_dc_peer_count")))
-extern int wc_dc_peer_count(void);
-
-__attribute__((import_module("env"), import_name("wc_dc_peer_info")))
-extern int wc_dc_peer_info(unsigned int index, char* dest, unsigned int max_len);
-
-__attribute__((import_module("env"), import_name("wc_dc_send")))
-extern int wc_dc_send(int peer_id, const void* data, unsigned int len);
-
-__attribute__((import_module("env"), import_name("wc_dc_broadcast")))
-extern int wc_dc_broadcast(const void* data, unsigned int len);
-#else
-static inline int wc_dc_peer_count(void) { return 0; }
-static inline int wc_dc_peer_info(unsigned int index, char* dest, unsigned int max_len) {
-    (void)index; (void)dest; (void)max_len; return -1;
-}
-static inline int wc_dc_send(int peer_id, const void* data, unsigned int len) {
+static inline void wc_peer_close(int peer_id) { (void)peer_id; }
+static inline int wc_peer_send(int peer_id, const void* data, unsigned int len) {
     (void)peer_id; (void)data; (void)len; return -1;
 }
-static inline int wc_dc_broadcast(const void* data, unsigned int len) {
+static inline int wc_peer_broadcast(const void* data, unsigned int len) {
     (void)data; (void)len; return -1;
+}
+static inline int wc_peer_state(int peer_id) {
+    (void)peer_id; return WC_PEER_CLOSED;
+}
+static inline int wc_peer_count(void) { return 0; }
+static inline int wc_peer_id(unsigned int index) { (void)index; return -1; }
+static inline int wc_peer_name(int peer_id, char* dest, unsigned int max_len) {
+    (void)peer_id; (void)dest; (void)max_len; return -1;
+}
+static inline int wc_peer_transport(int peer_id) {
+    (void)peer_id; return WC_TRANSPORT_UNKNOWN;
 }
 #endif
 
-// Data Channel exports (cart implements, host calls — all optional)
-// void wc_dc_on_connect(int peer_id, const char* label, unsigned int label_len);
-// void wc_dc_on_disconnect(int peer_id);
-// void wc_dc_on_message(int peer_id, const void* data, unsigned int len);
+// Peer exports (cart implements, host calls - all optional).
+// Binary only: text frames are meaningful for WebSocket and meaningless for a
+// serial cable or raw TCP, so framing belongs to the cart.
+//
+// peer_id is the handle - stable for the session, key your player table on it.
+// name is DISPLAY-ONLY: never assume it is unique, stable across sessions, or
+// trustworthy. It arrives from a remote machine, so it is attacker-controlled
+// text - bound the length, do not assume valid UTF-8, never use it as a key.
+//
+// void wc_peer_on_connect(int peer_id, const char* name, unsigned int name_len);
+// void wc_peer_on_message(int peer_id, const void* data, unsigned int len);
+// void wc_peer_on_disconnect(int peer_id);
+// void wc_peer_on_error(int peer_id);
 
-#endif // WC_USE_NET_DC
+#endif // WC_USE_NET_PEER
 
 // --- OpenGL ES 3.0 API (ABI v2, optional) ---
 // Define WC_USE_GL before including this header to enable GL imports.

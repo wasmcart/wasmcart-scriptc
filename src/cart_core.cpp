@@ -45,7 +45,14 @@ static size_t   g_pixels_size = 0;
 static char   g_mail[256];
 static size_t g_mail_len = 0;
 
-static void mail_set(const char* s) {
+/* Exported, not static: the GL shim and sg_audio_decode.cpp call
+ * sg_mail_set on their error paths, and an undefined one is host-stubbed
+ * to -1 -- so a real decode failure would report nothing at all. */
+extern "C" void sg_mail_set(const char* s);
+
+static void mail_set(const char* s) { sg_mail_set(s); }
+
+extern "C" void sg_mail_set(const char* s) {
     if (!s) { g_mail_len = 0; return; }
     size_t n = strlen(s);
     if (n >= sizeof(g_mail)) n = sizeof(g_mail) - 1;
@@ -306,9 +313,28 @@ extern "C" int32_t sg_cart_present(uint32_t* dest, uint32_t dest_px);
  * frame and then sat perfectly still -- with no error at all. */
 extern "C" void sg_cart_refresh_frame(void);
 
+/* scriptc's event loop: drains process.nextTick, then microtasks to
+ * exhaustion, then timers. Exported by the runtime (scr_async.c). */
+extern "C" void scr_loop_run(void);
+
 extern "C" int32_t sg_present(int32_t unused) {
     (void)unused;
     if (g_fb) sg_cart_present(g_fb, g_fb_px);
+    /* END THE TURN before suspending.
+     *
+     * A native build ends each frame with `await`, which lets promise
+     * continuations run; the cart's loop is synchronous (asyncify cannot
+     * rewind across a scriptc await), so nothing would ever drain the
+     * microtask queue and a fetch().then() chain would never advance. That
+     * is exactly what silenced a game's music: the fetch resolved and the
+     * handler that decodes it simply never ran, with no error.
+     *
+     * scr_loop_run does what the await did: nextTick, then microtasks to
+     * exhaustion, then due timers. Called here rather than at the top of
+     * the frame so continuations land before the frame that observes
+     * them, matching the ordering a browser gives. */
+    scr_loop_run();
+
     wc_frame_yield();
     /* Resumed: the host has advanced its clock and written new pad state. */
     sg_cart_refresh_frame();
