@@ -4,6 +4,12 @@
 
 Version tested: scriptc 0.0.17, `game-integration` at `fdaca6f`.
 
+> **Status.** Part 1 (size_t widths) is FIXED, in `f3c0e59` on the fork.
+> Part 2 (struct layouts and byte offsets), found while testing that fix,
+> is NOT. The cart still traps; see "What is still broken" at the bottom.
+> The original version of this document described only part 1 and was
+> therefore incomplete about what a 32-bit target needs.
+
 ## The claim
 
 The LLVM backend emits `i64` for every value that in C is `size_t` or
@@ -95,6 +101,8 @@ majority are correct**: JS numbers are doubles, array indices and string
 offsets are internal, and none of that changes. Only values crossing into C
 where the C says `size_t` are affected. Do not mass-replace.
 
+## Part 1: size_t widths (FIXED in f3c0e59)
+
 ## Suggested shape of a fix
 
 1. Give the backend a target notion. Minimally a `ptrBits: 32 | 64` on the
@@ -136,3 +144,82 @@ of `sg_core.cpp`; and the TypeScript imports scriptc-game's real
 Every later tier hits the same wall the moment it allocates, so this is the
 gating item for the whole wasmcart lane rather than a Canvas-specific
 problem.
+
+
+## What is still broken (part 2, found while testing part 1)
+
+Fixing every `size_t` width was necessary and not sufficient. With all
+signature mismatches gone, the Canvas cart still traps, now inside
+`scr_map_set_str_f64` during module init:
+
+```
+scr_map_set_str_f64
+sc_f__x25_init_2
+sc_f__x25_init_13
+sc_f__x25_init_27
+scriptc_main
+wc_render
+```
+
+That function's own signature has no `size_t`. The fault is one level down:
+**the runtime STRUCT layouts are hardcoded 64-bit too.**
+
+```ts
+// backend/llvm/emitter.ts:1286
+`%ScrStr = type { i64, i64, i64 }`,
+`%ScrVt = type { i64, i64, ptr }`,
+`%ScrUnion = type { i64, i32, ptr, ptr, ptr, i64 }`,
+`%ScrClosure = type { i64, ptr, i64, ptr }`,
+`%ScrArr = type { i64, i64, i64, i32, ptr, ptr, ptr, ptr }`,
+`%ScrError = type { i64, ptr, ptr, ptr, ptr }`,
+```
+
+The C is:
+
+```c
+typedef struct ScrStr {
+  size_t rc;
+  size_t len;
+  size_t cap;
+  char data[];
+} ScrStr;
+```
+
+On wasm32 that is `{i32, i32, i32}` with `data` at offset 12, but the
+backend emits `{i64, i64, i64}` and reads `data` at 24. Every string, array,
+closure and union field access is at the wrong offset. `scr_map_hash_str`
+reads `k->data` and `k->len`, gets garbage, and walks off the heap.
+
+The hardcoded byte offsets that accompany those layouts have the same
+problem. Counting just one idiom in `backend/llvm/`:
+
+```
+9 x  getelementptr inbounds i8, ptr %x, i64 16
+8 x  ... i64 8
+8 x  ... i64 24
+4 x  ... i64 32
+```
+
+Every one of those constants assumes 8-byte `size_t` fields.
+
+### What part 2 needs
+
+Not a sweep. The layouts and their offsets have to be derived from one
+place rather than written twice, so they cannot drift:
+
+1. Emit the struct types from a table keyed on `ptrBits`, so `%ScrStr` is
+   `{i32, i32, i32}` on a 32-bit target.
+2. Replace the literal byte offsets with computed ones from that same table.
+   The `getelementptr inbounds %ScrStr, ptr %s, i64 0, i32 1` form is
+   already layout-driven and needs nothing; it is the raw
+   `getelementptr i8 ... i64 24` byte arithmetic that must be generated.
+3. Audit the remaining struct-shaped `i64`s (`ScrArr`, `ScrClosure`,
+   `ScrUnion`, `ScrError`, `ScrRegex`, `ScrBytes`, `ScrMap`) against their C
+   definitions the same way part 1 audited the function signatures: by
+   parsing `packages/runtime/src`, not by matching names.
+
+Point 4 of the original fix suggestion (emit a `target datalayout` /
+`target triple`) is worth more than ever here. With a datalayout in the IR,
+LLVM itself would flag a struct whose layout disagrees with the target
+instead of silently producing wrong offsets, and part 2 would have been
+caught at compile time rather than as a heap walk at frame 1.

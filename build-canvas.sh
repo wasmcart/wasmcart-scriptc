@@ -51,10 +51,15 @@ PYEOF
 
 # ---- 2. TypeScript -> LLVM IR ----------------------------------------
 #
+# SCRIPTC_TARGET is a 32-BIT triple, and that is the whole point: it makes
+# the backend emit i32 for size_t, matching wasm32. x86-linux-gnu rather than
+# wasm32-wasi because scriptc's own C runtime does not compile under WASI
+# (~45 POSIX errors) and the IR is never written; x86 gets far enough.
+#
 # The native link at the end fails by design (our shim symbols are wasm
 # objects); the .ll is written first and is what we want.
 echo "==> scriptc: canvas_tracer.ts -> IR"
-SCRIPTC_CC=zigcc SCRIPTC_TARGET=x86_64-linux-gnu \
+SCRIPTC_CC=zigcc SCRIPTC_TARGET=x86-linux-gnu \
   node "$SCRIPTC_BIN" build "$HERE/src/canvas_tracer.ts" \
     --ffi "$OUT/cart.ffi.json" -o "$OUT/canvas_native" >/dev/null 2>&1 || true
 [ -f "$OUT/canvas_tracer.ll" ] || { echo "build-canvas.sh: no IR produced" >&2; exit 1; }
