@@ -21,6 +21,12 @@ static wc_host_info_t host_info;
 static wc_time_t      time_info;
 static wc_pad_t       pads[4];
 
+/* The audio ring lives in cart_audio.cpp; wc_get_info publishes it. */
+extern float    g_audio_ring[];
+extern uint32_t g_audio_write;
+extern void     sg_cart_audio_pump(uint32_t frames);
+#define AUDIO_CAP 8192
+
 static uint32_t frame_no     = 0;
 static int      program_done = 0;
 
@@ -40,6 +46,14 @@ uint32_t sg_gl_height(void) { return CART_HEIGHT; }
  * rather than replaying wc_render's body, so anything counted there runs
  * once and the frame number sticks at 1 forever. */
 uint32_t sg_gl_frame(void) {
+    /* Fill the ring BEFORE yielding: the host drains it right after
+     * wc_render returns, so audio rendered after the yield would arrive a
+     * frame late and the first frame would be silent.
+     *
+     * 800 frames is one 60Hz frame at 48kHz. Producing exactly one frame's
+     * worth per frame keeps the ring from either starving or lapping the
+     * host's read cursor. */
+    sg_cart_audio_pump(800);
     wc_frame_yield();
     frame_no++;
     return frame_no;
@@ -53,16 +67,18 @@ wc_info_t *wc_get_info(void) {
     info.width           = CART_WIDTH;
     info.height          = CART_HEIGHT;
     info.fb_ptr          = 0;        /* GL cart: nothing to read back */
-    info.audio_ptr       = 0;
-    info.audio_cap       = 0;
-    info.audio_write_ptr = 0;
+    info.audio_ptr       = (uint32_t)(uintptr_t)g_audio_ring;
+    info.audio_cap       = AUDIO_CAP;
+    info.audio_write_ptr = (uint32_t)(uintptr_t)&g_audio_write;
     info.input_ptr       = (uint32_t)(uintptr_t)pads;
     info.save_ptr        = 0;
     info.save_size       = 0;
     info.time_ptr        = (uint32_t)(uintptr_t)&time_info;
     info.host_info_ptr   = (uint32_t)(uintptr_t)&host_info;
-    info.flags           = 0;
-    info.audio_sample_rate = 0;
+    /* F32: the graph renders float, so handing the host int16 would mean a
+     * conversion pass for nothing. */
+    info.flags           = WC_FLAG_AUDIO_F32;
+    info.audio_sample_rate = 48000;
     info.pointer_ptr     = 0;
     info.keys_ptr        = 0;
     info.gpu_api         = 1;        /* WebGL2 */

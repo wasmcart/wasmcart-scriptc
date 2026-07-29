@@ -131,6 +131,20 @@ emcc -O2 -c "$HERE/src/gl_cart.c" -I"$HERE/src" -o "$OBJ/gl_cart.o"
 # every camera matrix was silently garbage.
 emcc -O2 -c "$HERE/src/gl_support.c" -I"$HERE/src" -o "$OBJ/gl_support.o"
 
+# Audio: scriptc-game's sg_audio surface over the cart ring buffer, on
+# webaudio-node's graph engine. The engine archive is the one
+# wasmcart-jsgame already builds for wasm -- same upstream, same C ABI as
+# the native shim drives.
+WEBAUDIO="${WEBAUDIO_A:-$HERE/../wasmcart-jsgame/obj/libwebaudio.a}"
+if [ -f "$WEBAUDIO" ]; then
+  em++ -O2 -std=c++20 -fno-exceptions -fno-rtti -c "$HERE/src/cart_audio.cpp" \
+    -o "$OBJ/cart_audio.o"
+  AUDIO_OBJS=("$OBJ/cart_audio.o" "$WEBAUDIO")
+else
+  echo "    (no libwebaudio.a at $WEBAUDIO -- building without audio)"
+  AUDIO_OBJS=()
+fi
+
 # ---- 6. link ----------------------------------------------------------
 #
 # Skia's archives must come in dependency order, and the whole set is needed:
@@ -139,6 +153,7 @@ emcc -O2 -c "$HERE/src/gl_support.c" -I"$HERE/src" -o "$OBJ/gl_support.o"
 echo "==> emcc: link gl.wasm"
 emcc -O2 "$OBJ/gl_cart.o" "$OBJ/tracer.o" "$OBJ/sg_tables.o" \
   "$OBJ/sg_gl_gen.o" "$OBJ/sg_gl_extra.o" "$OBJ/gl_bridge.o" "$OBJ/gl_support.o" \
+  ${AUDIO_OBJS[@]+"${AUDIO_OBJS[@]}"} \
   "${rt_objs[@]}" \
   -o "$OUT/gl-pre.wasm" \
   -sSTANDALONE_WASM -sERROR_ON_UNDEFINED_SYMBOLS=0 \

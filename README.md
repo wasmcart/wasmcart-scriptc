@@ -22,7 +22,7 @@ question.
 | Canvas 2D | **works**: gradients, paths, curves, alpha, transforms |
 | Text (FreeType/HarfBuzz/ICU) | **works**, including `measureText` shaping |
 | WebGL2 + threeTS-lite | **works**: lit, depth-tested 3D in a 456KB cart |
-| Audio | not started |
+| Web Audio | **works**: graph, mixing, params, into the cart ring |
 
 ```sh
 ./build.sh     # -> build/cart.wasm
@@ -230,6 +230,47 @@ plain-Object3D branch, was parented into `children`, registered in no draw
 list, and the renderer cleared correctly and drew nothing. Fixed in
 `d494e92` on the fork.
 
+## Audio
+
+Working. The same cart that draws the cube also plays a two-oscillator
+chord through scriptc-game's real `web/audio/context.js`, in 586KB total.
+
+Verified by spectrum, not by "sound came out". A Goertzel filter over the
+drained samples finds power 29.0 at 220Hz and 29.1 at 330Hz, against 0.01
+at 275Hz and 440Hz -- a ~3000x separation, and exactly the chord the
+TypeScript asked for. Two voices rather than one because a single
+oscillator cannot tell mixing from pass-through.
+
+With a control: changing only the two frequencies in the TS moves the peaks
+to 440/550 and drops the originals to 0.01.
+
+### What changed, and what did not
+
+The graph engine is webaudio-node's, unchanged -- the same
+`createAudioGraph` / `createNode` / `processGraph` C ABI the native shim
+drives, from the wasm archive `wasmcart-jsgame` already builds.
+`web/audio/context.ts` is untouched.
+
+`src/cart_audio.cpp` replaces `shim/sg_audio.cpp`, and is SMALLER than it
+for two reasons:
+
+- **No SDL device or audio thread.** A cart renders inline from
+  `wc_render` into the ring buffer the host drains after each frame.
+- **No command ring.** The native shim marshals every graph mutation
+  through a lock-free queue because SDL calls its callback on another
+  thread. In a cart the game and the renderer are the same thread, so calls
+  apply directly, and the whole `CMD_*` apply() switch disappears.
+
+Two details that would fail quietly if wrong. The ring cursor counts
+FRAMES, not samples or bytes -- publishing the wrong unit plays back at
+half or double speed, which sounds like resampling rather than indexing.
+And the pump runs BEFORE the yield, because the host drains immediately
+after `wc_render` returns; filling afterwards makes every frame's audio
+arrive one frame late and the first frame silent.
+
+Offline rendering (`sg_audio_render_offline`) writes a file and is reported
+as unavailable rather than stubbed silently.
+
 ## Where this goes next
 
 The interesting finding from the survey that preceded this: **`wasmcart-skia`
@@ -241,9 +282,9 @@ scriptc-game's `web/` tier are already solved.
 
 The order that makes sense from here:
 
-1. Audio, the last untouched tier.
-2. A real game, rather than a tracer: the examples in scriptc-game should
+1. A real game, rather than a tracer: the examples in scriptc-game should
    build as carts with no source changes.
+2. Input: the cart pad state is published but nothing reads it yet.
 
 Worth stating plainly: `wasmcart-jsgame` already runs real three.js as a cart
 through QuickJS. This lane's argument is not "3D in a cart is possible": it

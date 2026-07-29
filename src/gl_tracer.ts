@@ -21,6 +21,7 @@ import { WebGLRenderer } from "../../scriptc-game/three/renderer/WebGLRenderer.j
 import { Vector3 } from "../../scriptc-game/three/math/Vector3.js";
 
 import { WebGL2RenderingContext } from "../../scriptc-game/web/webgl/context.js";
+import { AudioContext } from "../../scriptc-game/web/audio/context.js";
 
 /* Suspends until the host asks for the next frame; see canvas_cart.c. The
  * GL cart has no framebuffer to present, so this only yields. */
@@ -50,6 +51,26 @@ scene.add(sun);
 
 const cube = new Mesh(new BoxGeometry(1.4, 1.4, 1.4), new MeshLambertMaterial(0xff8844));
 scene.add(cube);
+
+/* Audio through scriptc-game's real Web Audio shim. A quiet two-oscillator
+ * chord: two voices prove the graph MIXES rather than merely passing one
+ * node through, and a gain node proves parameters reach the engine. */
+const actx = new AudioContext();
+const master = actx.createGain();
+master.gain.value = 0.12;
+master.connect(actx.destination);
+
+const oscA = actx.createOscillator();
+oscA.type = "sine";
+oscA.frequency.value = 220;
+oscA.connect(master);
+oscA.start(0);
+
+const oscB = actx.createOscillator();
+oscB.type = "sine";
+oscB.frequency.value = 330;
+oscB.connect(master);
+oscB.start(0);
 
 const camera = new PerspectiveCamera(60, W / H, 0.1, 100);
 camera.position.set(0, 0, 4);
