@@ -333,13 +333,27 @@ spawned fiber never ran. scriptc `6ce125a` gives it real
 `emscripten_fiber_t` fibers (Asyncify-backed), verified in isolation before
 being wired in.
 
-It is still not enough, and the reason is honest to state: the cart's frame
-loop never reaches `sg_present`. A probe counter there stays at zero while
-frames render and yield normally, so **the frame boundary is somewhere
-other than where this cart assumes it is** -- which also means the
-`scr_loop_run()` turn-drain added beside it never runs. That is the next
-thing to find, and it invalidates part of the model described above rather
-than merely being an unfinished detail.
+**Correction: `sg_present` IS the frame boundary.** An earlier note here
+claimed it was never called. That was a broken probe, not a broken model --
+it painted a counter into the framebuffer that the game then overwrote.
+Read through an exported wasm function instead, the numbers are exact:
+5 host frames give 5 `sg_present` calls and 5 `scr_loop_run` calls, and
+`wc_frame_yield` fires twice per frame (once resuming, once suspending),
+which is what a rewind-into-the-yield looks like.
+
+So the turn IS ending and the microtask queue IS being drained. The queue
+is simply always empty: `scr_loop_has_ready()` is false on every frame.
+
+Narrowed to the smallest case that still fails: a bare
+`Promise.resolve(1).then(v => { stage = v })` in a cart, with no fetch, no
+assets and no I/O, never runs its continuation. So the problem is not the
+fetch path, not the asset store, and not the drain -- it is that `.then`
+on an already-resolved promise never enqueues anything under wasm.
+
+Asyncify is confirmed applied (all five `asyncify_*` exports present) and
+the emscripten-fiber path is linked, so the remaining suspect is how
+`scr_async_spawn`'s fiber interacts with the cart's own outer Asyncify
+unwind -- two nested users of the same transform.
 
 Also fixed on the way: `sg_mail_set` was an undefined import (host-stubbed
 to -1), so any decode or GL error reported nothing at all. `cart_core.cpp`

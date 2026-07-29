@@ -317,8 +317,32 @@ extern "C" void sg_cart_refresh_frame(void);
  * exhaustion, then timers. Exported by the runtime (scr_async.c). */
 extern "C" void scr_loop_run(void);
 
+/* Diagnostic counters, exported so a harness can read them WITHOUT going
+ * through the game's own render path.
+ *
+ * Kept because an in-game probe reported sg_present as never called, which
+ * sent this investigation down a wrong path for a while: the probe was
+ * painting into a framebuffer the game then overwrote. Reading a counter
+ * through an export cannot be fooled that way. */
+uint32_t sc_present_calls = 0;
+uint32_t sc_loop_calls = 0;
+__attribute__((export_name("sc_present_calls")))
+extern "C" uint32_t sc_get_present_calls(void) { return sc_present_calls; }
+__attribute__((export_name("sc_loop_calls")))
+extern "C" uint32_t sc_get_loop_calls(void) { return sc_loop_calls; }
+
+/* Is anything ON the microtask queue when the turn ends? If this stays 0
+ * the continuations were never queued; if it climbs, they are queued but
+ * not running. */
+extern "C" bool scr_loop_has_ready(void);
+
+uint32_t sc_ready_seen = 0;
+__attribute__((export_name("sc_ready_seen")))
+extern "C" uint32_t sc_get_ready_seen(void) { return sc_ready_seen; }
+
 extern "C" int32_t sg_present(int32_t unused) {
     (void)unused;
+    sc_present_calls++;
     if (g_fb) sg_cart_present(g_fb, g_fb_px);
     /* END THE TURN before suspending.
      *
@@ -333,6 +357,10 @@ extern "C" int32_t sg_present(int32_t unused) {
      * exhaustion, then due timers. Called here rather than at the top of
      * the frame so continuations land before the frame that observes
      * them, matching the ordering a browser gives. */
+    sc_loop_calls++;
+    /* Check for queued microtasks BOTH before and after the host task
+     * drain, since a resolved fetch queues its continuation from there. */
+    if (scr_loop_has_ready()) sc_ready_seen++;
     scr_loop_run();
 
     wc_frame_yield();
