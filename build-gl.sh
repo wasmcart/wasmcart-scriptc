@@ -164,10 +164,17 @@ emcc -O2 "$OBJ/gl_cart.o" "$OBJ/tracer.o" "$OBJ/sg_tables.o" \
 echo "==> wasm-opt: asyncify around wc_frame_yield"
 WASM_OPT="${WASM_OPT:-$(dirname "$(command -v emcc)")/../bin/wasm-opt}"
 [ -x "$WASM_OPT" ] || WASM_OPT=wasm-opt
+# --enable-threads is about VALIDATION, not concurrency. Current Skia emits
+# atomic ops (7146 of them in libskia.a; a May 2026 build had none), and
+# wasm-opt refuses to validate a module containing them unless the feature is
+# enabled -- "Atomic operations require threads [--enable-threads]". The cart
+# is still single-threaded: nothing here spawns a worker, and the atomics are
+# uncontended. Without this the asyncify pass fails outright and no cart is
+# produced.
 "$WASM_OPT" --asyncify \
   --pass-arg=asyncify-imports@env.wc_frame_yield \
   --enable-nontrapping-float-to-int --enable-bulk-memory --enable-sign-ext \
-  --enable-mutable-globals --enable-simd \
+  --enable-mutable-globals --enable-simd --enable-threads \
   -O2 "$OUT/gl-pre.wasm" -o "$OUT/gl.wasm"
 
 # Pack with assets: the font is loaded through the host asset API rather
