@@ -112,11 +112,14 @@ extern "C" int32_t sg_canvas_release(uint32_t hc) {
  * copied straight into the cart's framebuffer, which the host reads after
  * wc_render returns.
  *
- * Skia gives BGRA premultiplied and wasmcart wants 0xAARRGGBB little-endian,
- * which is the same byte order, so this is a straight copy rather than a
- * per-pixel swizzle. Getting that backwards shows up as red and blue swapped
- * across the whole frame, which is easy to see and easy to misread as a
- * shader bug. */
+ * A per-pixel R/B SWAP, not a straight copy.
+ *
+ * The surface is created RGBA-premultiplied, so Skia's bytes are R,G,B,A in
+ * memory; wasmcart reads the framebuffer as 0xAARRGGBB little-endian, whose
+ * bytes are B,G,R,A. An earlier version of this file asserted the two orders
+ * matched and memcpy'd, which rendered a dark blue scene brown and an amber
+ * square cyan -- correct geometry, every colour wrong, which reads as a
+ * shader or gradient bug rather than a byte-order one. */
 extern "C" int32_t sg_cart_present(uint32_t* dest, uint32_t dest_px) {
     if (!g_surface || !g_pixels) { mail_set("present before init"); return SG_ESKIA; }
 
@@ -128,6 +131,12 @@ extern "C" int32_t sg_cart_present(uint32_t* dest, uint32_t dest_px) {
 
     size_t n = g_pixels_size / 4;
     if (n > dest_px) n = dest_px;
-    memcpy(dest, data.ptr, n * 4);
+    const uint32_t* src = (const uint32_t*)data.ptr;
+    for (size_t i = 0; i < n; i++) {
+        uint32_t p = src[i];                      /* 0xAABBGGRR in memory */
+        dest[i] = (p & 0xFF00FF00u)               /* alpha and green stay */
+                | ((p & 0x00FF0000u) >> 16)       /* B down to the low byte */
+                | ((p & 0x000000FFu) << 16);      /* R up to the high byte */
+    }
     return SG_OK;
 }

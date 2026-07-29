@@ -19,7 +19,8 @@ question.
 | scriptc C runtime under Emscripten | 50 of 54 files |
 | TS-owned game loop in a cart | works, via wasmcart's yield protocol |
 | Pixels driven by compiled TS | verified to the pixel, with a control |
-| Canvas 2D | **blocked upstream**, see below |
+| Canvas 2D | **works**: gradients, paths, curves, alpha, transforms |
+| Text (FreeType/HarfBuzz/ICU) | untested |
 | WebGL / audio | not started |
 
 ```sh
@@ -107,48 +108,56 @@ It comes with a control that must fail. Changing the step from 2 to 5 in
 `verify.sh` reports the failure. Without that, "the pixels match" cannot be
 distinguished from a harness reading a stale file.
 
-## Canvas 2D: built, and blocked on one compiler detail
+## Canvas 2D
 
-`build-canvas.sh` builds it and it links (7MB with Skia). Everything on the
-scriptc-game side ports cleanly:
+Working. `./build-canvas.sh` produces a 2.4MB `.wasc` that renders a gradient
+background, twelve alpha-blended circles, a rotated square and a stroked
+bezier, all through scriptc-game's real `web/canvas/context.js`.
 
-- `shim/sg_skia_gen.cpp` and `shim/sg_skia_extra.cpp` compile under emcc
-  **unmodified** against wasmcart-skia's `libskiac.a`.
-- `src/cart_core.cpp` replaces only `shim/sg_core.cpp` (the SDL window,
-  renderer and streaming texture) with a Skia surface copied into the cart
-  framebuffer. That is ~130 lines.
-- `src/canvas_tracer.ts` imports scriptc-game's real `web/canvas/context.js`.
-  Not a reimplementation: the same file a native build uses.
+Colours are byte-exact against what the TypeScript asked for: `#0b1020` reads
+back `(11,16,33)`, `#1d3b6e` reads `(29,59,110)`, `#ffd166` reads
+`(255,209,102)`. There is a control for that: changing the square to
+`#22cc44` in the TS moves the sampled pixel to exactly `(34,204,68)`.
 
-**It traps at runtime with "memory access out of bounds", and the cause is in
-scriptc, not here.** Its LLVM IR hardcodes 64-bit `size_t`:
+What ports unchanged: `shim/sg_skia_gen.cpp` and `shim/sg_skia_extra.cpp`
+compile under emcc with no edits against wasmcart-skia's `libskiac.a`. The
+only new C is `src/cart_core.cpp` (~130 lines), replacing the SDL window half
+of `shim/sg_core.cpp` with a Skia surface copied into the cart framebuffer.
 
-```
-declare ptr @calloc(i64, i64)
-declare ptr @scr_arr_new(i32, i64)
-declare i32 @sg_text_set_font(ptr, i64, double, i32, i32)
-```
+Text is not exercised yet. `fillText` pulls in the whole font stack
+(FreeType, HarfBuzz, ICU) and none of that has been checked.
 
-wasm32 wants `i32` for all of those. wasm-ld reports each as a "function
-signature mismatch" warning and links anyway; the calls then read out of
-bounds. Setting `SCRIPTC_TARGET` to a 32-bit triple (`x86-linux-gnu`,
-`wasm32-wasi`) does not change the widths, so this is not a flag away.
+### Getting there took four bugs, three of them mine
 
-The framebuffer tracer is unaffected because it makes **zero** allocator
-calls and passes no spans: `grep -c 'call.*@calloc\|call.*@scr_arr_new'` on
-its IR is 0. Anything that allocates or takes a string crosses the boundary.
+**1. scriptc assumed a 64-bit target.** Every `size_t` was emitted as `i64`,
+and so were the runtime struct layouts and the byte offsets derived from
+them. Fixed on the fork in `f3c0e59` and `55e0ca0`; see
+[SCRIPTC-32BIT.md](SCRIPTC-32BIT.md).
 
-The fix belongs in scriptc: lower `size_t`, the FFI `string`/`bytes` length,
-and the allocator signatures to pointer width rather than always 64-bit.
-Written up with exact sites and a suggested shape in
-[SCRIPTC-32BIT.md](SCRIPTC-32BIT.md), for the monteslu fork. Not filed
-upstream.
+**2. A missing object file, mistaken for a layout bug.** `scr_regex.c` was
+excluded from the build as "needs libregexp, cart-irrelevant". Both halves
+were wrong: it compiles fine with quickjs-ng on the include path, and
+`scr_str_to_lower`/`to_upper` live in it, so any cart calling
+`.toLowerCase()` got an undefined symbol. `-sERROR_ON_UNDEFINED_SYMBOLS=0`
+turned that into a trapping stub rather than a link error, which sent me
+hunting through struct layouts for what was a one-line build omission.
 
-Two changes landed in scriptc-game while getting here, both green on the
-native suite and worth having regardless: FFI span lengths are `uint32_t`
-instead of `size_t` (identical natively, correct on wasm32), and
-`SG_EXTRA_SHIM` lets `gen-ffi` parse C signatures from a consumer's own shim
-sources.
+**3. The same omission again, one layer down.** After adding `scr_regex.o`,
+the bisect harness still failed: it linked `scr_*.o` by glob, which does not
+match `libregexp.o` or `libunicode.o`. Same silent-stub failure mode, and
+this time it presented as a *wrong answer* (`"A".toLowerCase().length === 0`)
+rather than a crash.
+
+**4. Red and blue swapped.** The surface is RGBA-premultiplied, so Skia's
+bytes are R,G,B,A; wasmcart reads 0xAARRGGBB little-endian, whose bytes are
+B,G,R,A. `cart_core.cpp` claimed the two orders matched and memcpy'd. The
+geometry was perfect and every colour was wrong, which reads as a gradient or
+shader bug rather than a byte-order one.
+
+The common thread in 2 and 3 is `-sERROR_ON_UNDEFINED_SYMBOLS=0`. It is
+needed (the cart genuinely does not provide every symbol the runtime
+references), but it converts "you forgot to link something" into a runtime
+trap or, worse, a silently wrong value.
 
 ## Where this goes next
 
@@ -161,9 +170,7 @@ scriptc-game's `web/` tier are already solved.
 
 The order that makes sense from here:
 
-1. The `size_t` width fix in scriptc. Canvas 2D is otherwise done and
-   waiting on it, and every later tier hits the same wall the moment it
-   allocates.
+1. Text, which needs the font stack verified end to end.
 2. WebGL2, mapping `web/webgl/context.ts` onto the cart's `gl` imports the
    way `wasmcart-jsgame/src/webgl_shim.c` does.
 3. threeTS-lite on top, which should need no changes if 2 is faithful.

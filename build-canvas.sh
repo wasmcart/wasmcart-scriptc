@@ -83,11 +83,17 @@ static inline void arc4random_buf(void *buf, size_t n) {
 }
 #endif
 EOF
-rt_objs=()
+# scr_regex.c pulls lre_* out of quickjs-ng's libregexp/libunicode.
+QJS="$RT/vendor/quickjs-ng"
+for q in libregexp libunicode; do
+  emcc -O2 -c "$QJS/$q.c" -I"$QJS" -o "$OBJ/$q.o" 2>/dev/null
+done
+
+rt_objs=("$OBJ/libregexp.o" "$OBJ/libunicode.o")
 for f in "$RT"/src/*.c; do
   b="$(basename "$f" .c)"
-  case "$b" in scr_http|scr_regex|scr_tls|scr_inspect_island) continue;; esac
-  emcc -O2 -c "$f" -I"$RT/include" -I"$RT/src" -include "$OBJ/a4r_shim.h" -o "$OBJ/$b.o" 2>/dev/null
+  case "$b" in scr_http|scr_tls|scr_inspect_island) continue;; esac
+  emcc -O2 -c "$f" -I"$RT/include" -I"$RT/src" -I"$QJS" -include "$OBJ/a4r_shim.h" -o "$OBJ/$b.o" 2>/dev/null
   rt_objs+=("$OBJ/$b.o")
 done
 
