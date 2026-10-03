@@ -128,10 +128,16 @@ enum {
     SDL_BTN_LEFTSHOULDER = 9, SDL_BTN_RIGHTSHOULDER = 10,
     SDL_BTN_DPAD_UP = 11, SDL_BTN_DPAD_DOWN = 12,
     SDL_BTN_DPAD_LEFT = 13, SDL_BTN_DPAD_RIGHT = 14,
-    SDL_BTN_MAX = 15,
+    /* SDL 2.0.14+; ABI v4 gave each of these a wasmcart bit. */
+    SDL_BTN_MISC1 = 15, SDL_BTN_PADDLE1 = 16, SDL_BTN_PADDLE2 = 17,
+    SDL_BTN_PADDLE3 = 18, SDL_BTN_PADDLE4 = 19, SDL_BTN_TOUCHPAD = 20,
+    SDL_BTN_MAX = 21,
 };
 
-static uint16_t mask_for(uint32_t sdl_button) {
+/* uint32_t, not uint16_t: ABI v4 put GUIDE at bit 14 and the paddles up at
+ * bits 16-19, so a 16-bit mask would truncate every bit above SELECT the
+ * moment one is added to this table. The field it is tested against is u32. */
+static uint32_t mask_for(uint32_t sdl_button) {
     switch (sdl_button) {
     case SDL_BTN_A:              return WC_BTN_A;
     case SDL_BTN_B:              return WC_BTN_B;
@@ -147,7 +153,14 @@ static uint16_t mask_for(uint32_t sdl_button) {
     case SDL_BTN_DPAD_RIGHT:     return WC_BTN_RIGHT;
     case SDL_BTN_LEFTSTICK:      return WC_BTN_L3;
     case SDL_BTN_RIGHTSTICK:     return WC_BTN_R3;
-    default:                     return 0;   /* GUIDE: no wasmcart bit */
+    case SDL_BTN_GUIDE:          return WC_BTN_GUIDE;      /* ABI v4 */
+    case SDL_BTN_MISC1:          return WC_BTN_MISC1;      /* ABI v4 */
+    case SDL_BTN_PADDLE1:        return WC_BTN_PADDLE1;    /* ABI v4 */
+    case SDL_BTN_PADDLE2:        return WC_BTN_PADDLE2;    /* ABI v4 */
+    case SDL_BTN_PADDLE3:        return WC_BTN_PADDLE3;    /* ABI v4 */
+    case SDL_BTN_PADDLE4:        return WC_BTN_PADDLE4;    /* ABI v4 */
+    case SDL_BTN_TOUCHPAD:       return WC_BTN_TOUCHPAD;   /* ABI v4 */
+    default:                     return 0;
     }
 }
 
@@ -157,13 +170,18 @@ extern "C" uint32_t sg_pad_connected(uint32_t slot) {
 
 extern "C" uint32_t sg_pad_button(uint32_t slot, uint32_t button) {
     if (slot >= 4 || button >= SDL_BTN_MAX) return 0;
-    uint16_t m = mask_for(button);
+    uint32_t m = mask_for(button);
     return m && (g_pads[slot].buttons & m) ? 1u : 0u;
 }
 
-/* Axes are int16 on the wire and -1..1 to the game. Triggers are uint8 and
- * 0..1: SDL reports them as axes 4 and 5, which is where gamepad.ts looks
- * for L2/R2. */
+/* Every axis is int16 on the wire as of ABI v4, triggers included: sticks
+ * -32768..32767 and triggers 0..WC_TRIGGER_MAX. Both divide by 32767 here,
+ * which is the point of the change -- the old uint8 trigger needed its own
+ * /255.0 and that asymmetry is what three hosts got wrong. SDL reports the
+ * triggers as axes 4 and 5, which is where gamepad.ts looks for L2/R2, and
+ * it reports them 0..32767 too, so the game sees the same 0..1 it would
+ * natively. Scaling the v4 value by /255.0 would hand the game ~128.5 and
+ * every deadzone and clamp downstream would read a trigger as pinned. */
 extern "C" double sg_pad_axis(uint32_t slot, uint32_t axis) {
     if (slot >= 4) return 0.0;
     const wc_pad_t* p = &g_pads[slot];
@@ -172,8 +190,8 @@ extern "C" double sg_pad_axis(uint32_t slot, uint32_t axis) {
     case 1: return (double)p->left_y  / 32767.0;
     case 2: return (double)p->right_x / 32767.0;
     case 3: return (double)p->right_y / 32767.0;
-    case 4: return (double)p->left_trigger  / 255.0;
-    case 5: return (double)p->right_trigger / 255.0;
+    case 4: return (double)p->left_trigger  / (double)WC_TRIGGER_MAX;
+    case 5: return (double)p->right_trigger / (double)WC_TRIGGER_MAX;
     default: return 0.0;
     }
 }
