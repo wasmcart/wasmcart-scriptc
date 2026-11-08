@@ -158,8 +158,12 @@ cp "$OUT/game-pre.wasm" "$OUT/game.wasm"
 
 # Pack with the game's own assets: the cart reads them through the host
 # asset API, so this is what makes fetch()/Image src resolve.
+# The cart's version is the game's: scriptc-game's git version (the tag at a
+# clean v<semver> tag, else <last tag>-dev.g<commit>; wasmcart-pack 0.40.0 or
+# later), not this repo's. CART_VERSION sets it by hand.
 node "$HERE/../wasmcart/bin/wasmcart.js" pack \
   --wasm "$OUT/game.wasm" --assets "$SG/examples/dodge/public" \
+  --version-from "$SG/examples/dodge" ${CART_VERSION:+--version "$CART_VERSION"} \
   --output "$HERE/game.wasc" >/dev/null
 
 ls -la "$OUT/game.wasm" "$HERE/game.wasc"
